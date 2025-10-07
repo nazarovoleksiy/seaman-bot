@@ -10,16 +10,6 @@ app.get('/', (_, res) => res.send('Seaman Assistant OK'));
 
 const PORT = process.env.PORT || 3000;
 
-const USE_WEBHOOK = true; // или читай из env, см. ниже
-const secretPath = `/tg/webhook/${process.env.BOT_TOKEN}`;
-
-// HTTP endpoint для Telegram
-app.post(secretPath, (req, res) => {
-    bot.handleUpdate(req.body);
-    res.sendStatus(200);
-});
-
-
 app.listen(PORT, () => console.log('HTTP on', PORT));
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
