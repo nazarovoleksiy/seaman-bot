@@ -1,6 +1,15 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import OpenAI from 'openai';
+import express from 'express';
+
+const app = express();
+
+app.use(express.json());
+app.get('/', (_, res) => res.send('Seaman Assistant OK'));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('HTTP on', PORT));
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
