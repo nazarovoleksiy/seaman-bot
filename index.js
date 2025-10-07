@@ -1,0 +1,162 @@
+import 'dotenv/config';
+import { Telegraf } from 'telegraf';
+import OpenAI from 'openai';
+
+const bot = new Telegraf(process.env.BOT_TOKEN);
+const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Простая память: кто на каком языке работает
+const userLanguage = new Map();
+
+// ========== ВЫБОР ЯЗЫКА ==========
+bot.start(async (ctx) => {
+    await ctx.reply(
+        '🌍 Choose your language / Выбери язык:\n\n🇬🇧 English\n🇷🇺 Русский',
+        {
+            reply_markup: {
+                keyboard: [['🇬🇧 English', '🇷🇺 Русский']],
+                one_time_keyboard: true,
+                resize_keyboard: true,
+            },
+        }
+    );
+});
+
+bot.hears(['🇬🇧 English', 'English'], async (ctx) => {
+    userLanguage.set(ctx.from.id, 'en');
+    await ctx.reply('✅ Language set to English. Send a test photo with question.');
+});
+
+bot.hears(['🇷🇺 Русский', 'Русский'], async (ctx) => {
+    userLanguage.set(ctx.from.id, 'ru');
+    await ctx.reply('✅ Язык установлен: русский. Пришли фото вопроса.');
+});
+
+// ========== ОБРАБОТКА ФОТО ==========
+bot.on('photo', async (ctx) => {
+    const lang = userLanguage.get(ctx.from.id) || 'en';
+    try {
+        await ctx.reply(lang === 'ru'
+            ? '📷 Фото получено. Проверяю тему...'
+            : '📷 Photo received. Checking topic...');
+
+        const photos = ctx.message.photo;
+        const fileId = photos[photos.length - 1].file_id;
+        const file = await ctx.telegram.getFile(fileId);
+        const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+
+        // 1) Классификация темы
+        const { is_maritime, confidence } = await classifyQuestionImage(fileUrl, lang);
+
+        if (!is_maritime || confidence < 60) {
+            return ctx.reply(
+                lang === 'ru'
+                    ? '🛑 Извини, это не похоже на морской тест. Пришли вопрос по судовым системам, безопасности, STCW, навигации, MARPOL и т.п.'
+                    : '🛑 Sorry, this doesn’t look like a maritime test. Please send a question about ship systems, safety, STCW, navigation, MARPOL, etc.'
+            );
+        }
+
+        // 2) Разбираем правильный ответ (коротко, одна строка)
+
+
+        const analysis = await analyzeQuestionImage(fileUrl, lang);
+        await ctx.reply(analysis);
+    } catch (e) {
+        console.error('Photo error:', e);
+        await ctx.reply(
+            lang === 'ru'
+                ? '⚠️ Ошибка при обработке фото. Пришли чёткое изображение с вариантами A/B/C/D.'
+                : '⚠️ Error processing the photo. Send a clear image with A/B/C/D options.'
+        );
+    }
+});
+
+// ========== АНАЛИЗ ВОПРОСА ==========
+async function classifyQuestionImage(imageUrl, lang = 'en') {
+    const instruction =
+        lang === 'ru'
+            ? `Ты — классификатор. По изображению с вопросом определи, относится ли вопрос к морской тематике:
+- судовые системы, механизмы, машинное отделение, безопасность, навигация, морское право/СТКВ (STCW), аварийные процедуры, снабжение, бункеровка, экология/ MARPOL.
+Ответь строго JSON без лишнего текста:
+{"is_maritime": true|false, "confidence": 0..100}`
+            : `You are a classifier. From the question image decide if it is MARITIME-related:
+- ship systems, machinery, engine room, safety, navigation, maritime law/STCW, emergency procedures, provisioning, bunkering, ecology/MARPOL.
+Reply STRICTLY as JSON, no extra text:
+{"is_maritime": true|false, "confidence": 0..100}`;
+
+    const res = await ai.responses.create({
+        model: 'gpt-4.1-mini',
+        temperature: 0,
+        input: [
+            { role: 'system', content: instruction },
+            { role: 'user', content: [{ type: 'input_image', image_url: imageUrl }] }
+        ]
+    });
+
+    // пытаемся распарсить JSON даже если модель добавила лишнее
+    const raw = (res.output_text || '').trim();
+    const match = raw.match(/\{[\s\S]*\}/);
+    try {
+        const json = JSON.parse(match ? match[0] : '{}');
+        return {
+            is_maritime: !!json.is_maritime,
+            confidence: Number(json.confidence) || 0
+        };
+    } catch {
+        return { is_maritime: false, confidence: 0 };
+    }
+}
+
+
+async function analyzeQuestionImage(imageUrl, lang) {
+    const instruction =
+        lang === 'ru'
+            ? `Ты — морской инструктор. Определи правильный ответ по фото вопроса.
+Отвечай строго по формату:
+✅ Правильный ответ: <буква> — <текст варианта>
+Не добавляй объяснений, советов, вступлений или других строк.`
+            : `You are a marine instructor. Determine the correct answer from the photo question.
+Reply strictly in this format:
+✅ Correct answer: <letter> — <answer text>
+Do NOT add explanations, greetings, or extra text.`;
+
+    try {
+        const res = await ai.responses.create({
+            model: 'gpt-4.1-mini',
+            temperature: 0,
+            input: [
+                { role: 'system', content: instruction },
+                { role: 'user', content: [{ type: 'input_image', image_url: imageUrl }] },
+            ],
+        });
+
+        // оставить только первую строку и чистый текст
+        const out = (res.output_text || '')
+            .replace(/^[^✅]*✅/, '✅')
+            .split('\n')[0]
+            .trim();
+
+        return out || (lang === 'ru'
+            ? '⚠️ Не удалось распознать вопрос. Пришли фото четче.'
+            : '⚠️ Could not recognize the question. Please send a clearer photo.');
+    } catch (e) {
+        console.error('Vision error:', e);
+        return lang === 'ru'
+            ? '⚠️ Ошибка при анализе фото. Попробуй позже.'
+            : '⚠️ Error analyzing photo. Try again later.';
+    }
+}
+
+// ========== ЗАПУСК ==========
+bot.on('text', async (ctx) => {
+    const lang = userLanguage.get(ctx.from.id) || 'en';
+
+    if (lang === 'ru') {
+        await ctx.reply('🖼 Я принимаю только фото с вопросами. Пришли изображение с вариантами ответов.');
+    } else {
+        await ctx.reply('🖼 I only accept photos with questions. Please send an image containing the test.');
+    }
+});
+
+bot.launch();
+console.log('✅ Бот запущен. Работает только с фото-тестами и выбором языка.');
