@@ -9,6 +9,17 @@ app.use(express.json());
 app.get('/', (_, res) => res.send('Seaman Assistant OK'));
 
 const PORT = process.env.PORT || 3000;
+
+const USE_WEBHOOK = true; // или читай из env, см. ниже
+const secretPath = `/tg/webhook/${process.env.BOT_TOKEN}`;
+
+// HTTP endpoint для Telegram
+app.post(secretPath, (req, res) => {
+    bot.handleUpdate(req.body);
+    res.sendStatus(200);
+});
+
+
 app.listen(PORT, () => console.log('HTTP on', PORT));
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -167,5 +178,31 @@ bot.on('text', async (ctx) => {
     }
 });
 
-bot.launch();
+// BASE_URL должен приходить из переменных окружения Render
+// Пример значения: https://seaman-bot.onrender.com   (без завершающего /)
+const BASE_URL = process.env.BASE_URL;
+const secretPath = `/tg/webhook/${process.env.BOT_TOKEN}`;
+
+// Если BASE_URL задан — включаем webhook. Иначе (локально) используем polling.
+if (BASE_URL) {
+    // На всякий случай уберём завершающий слэш, если он есть
+    const base = BASE_URL.replace(/\/+$/, '');
+    const url = `${base}${secretPath}`;
+
+    // HTTP endpoint, на который Telegram будет слать апдейты
+    app.post(secretPath, (req, res) => {
+        bot.handleUpdate(req.body);
+        res.sendStatus(200);
+    });
+
+    // Регистрируем вебхук в Telegram
+    bot.telegram.setWebhook(url)
+        .then(() => console.log('✅ Webhook set to', url))
+        .catch(err => console.error('❌ Webhook set error:', err));
+} else {
+    // Локальная разработка — long polling
+    bot.launch().then(() => console.log('✅ Bot polling (local mode)'));
+}
+
+console.log('⚙️ HTTP server listening...');
 console.log('✅ Бот запущен. Работает только с фото-тестами и выбором языка.');
