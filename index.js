@@ -56,7 +56,7 @@ bot.on('photo', async (ctx) => {
         const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
         // 1) Классификация темы
-        const { is_maritime, confidence } = await classifyQuestionImage(fileUrl, lang);
+       /* const { is_maritime, confidence } = await classifyQuestionImage(fileUrl, lang);
 
         if (!is_maritime || confidence < 60) {
             return ctx.reply(
@@ -64,7 +64,9 @@ bot.on('photo', async (ctx) => {
                     ? '🛑 Извини, это не похоже на морской тест. Пришли вопрос по судовым системам, безопасности, STCW, навигации, MARPOL и т.п.'
                     : '🛑 Sorry, this doesn’t look like a maritime test. Please send a question about ship systems, safety, STCW, navigation, MARPOL, etc.'
             );
-        }
+        } */
+
+
 
         // 2) Разбираем правильный ответ (коротко, одна строка)
 
@@ -121,29 +123,32 @@ Reply STRICTLY as JSON, no extra text:
 async function analyzeQuestionImage(imageUrl, lang) {
     const instruction =
         lang === 'ru'
-            ? `Ты — морской инструктор. Определи правильный ответ по фото вопроса.
-Отвечай строго по формату:
+            ? `Ты — преподаватель. На фото изображён вопрос с вариантами ответов (A, B, C, D).
+Определи правильный ответ и кратко объясни почему.
+Формат:
 ✅ Правильный ответ: <буква> — <текст варианта>
-Не добавляй объяснений, советов, вступлений или других строк.`
-            : `You are a marine instructor. Determine the correct answer from the photo question.
-Reply strictly in this format:
-✅ Correct answer: <letter> — <answer text>
-Do NOT add explanations, greetings, or extra text.`;
+💡 Объяснение: <1–2 предложения>`
+            : `You are a teacher. The image shows a multiple-choice question (A, B, C, D).
+Find the correct answer and briefly explain why.
+Format:
+✅ Correct answer: <letter> — <option text>
+💡 Explanation: <1–2 short sentences>`;
 
     try {
         const res = await ai.responses.create({
             model: 'gpt-4.1-mini',
-            temperature: 0,
+            temperature: 0.2,
             input: [
                 { role: 'system', content: instruction },
                 { role: 'user', content: [{ type: 'input_image', image_url: imageUrl }] },
             ],
         });
 
-        // оставить только первую строку и чистый текст
+        // Извлекаем только нужные строки (ответ + объяснение)
         const out = (res.output_text || '')
-            .replace(/^[^✅]*✅/, '✅')
-            .split('\n')[0]
+            .split('\n')
+            .filter(line => line.includes('✅') || line.includes('💡'))
+            .join('\n')
             .trim();
 
         return out || (lang === 'ru'
