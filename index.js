@@ -173,29 +173,31 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// BASE_URL должен приходить из переменных окружения Render
-// Пример значения: https://seaman-bot.onrender.com   (без завершающего /)
-const BASE_URL = process.env.BASE_URL;
-const secretPath = `/tg/webhook/${process.env.BOT_TOKEN}`;
+// ---- Webhook (без токена в пути) ----
+const BASE_URL = process.env.BASE_URL; // например: https://seaman-bot.onrender.com
+const WH_SECRET = process.env.WH_SECRET; // задай в Render любой длинный рандомный ключ
+const WEBHOOK_PATH = '/tg/webhook';     // БЕЗ токена и двоеточий!
 
-// Если BASE_URL задан — включаем webhook. Иначе (локально) используем polling.
 if (BASE_URL) {
-    // На всякий случай уберём завершающий слэш, если он есть
-    const base = BASE_URL.replace(/\/+$/, '');
-    const url = `${base}${secretPath}`;
+    const url = `${BASE_URL.replace(/\/+$/, '')}${WEBHOOK_PATH}`;
 
-    // HTTP endpoint, на который Telegram будет слать апдейты
-    app.post(secretPath, (req, res) => {
-        bot.handleUpdate(req.body);
-        res.sendStatus(200);
+    // 1) endpoint для Telegram
+    app.post(WEBHOOK_PATH, (req, res) => {
+        // Проверяем секрет (Telegram пришлёт его в заголовке)
+        const headerSecret = req.get('x-telegram-bot-api-secret-token');
+        if (!WH_SECRET || headerSecret === WH_SECRET) {
+            bot.handleUpdate(req.body);
+            return res.sendStatus(200);
+        }
+        return res.sendStatus(401);
     });
 
-    // Регистрируем вебхук в Telegram
-    bot.telegram.setWebhook(url)
+    // 2) Регистрируем вебхук c секретом
+    bot.telegram.setWebhook(url, { secret_token: WH_SECRET })
         .then(() => console.log('✅ Webhook set to', url))
         .catch(err => console.error('❌ Webhook set error:', err));
 } else {
-    // Локальная разработка — long polling
+    // локальная разработка
     bot.launch().then(() => console.log('✅ Bot polling (local mode)'));
 }
 
