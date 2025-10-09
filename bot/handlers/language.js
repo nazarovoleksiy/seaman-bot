@@ -25,10 +25,24 @@ export function registerLanguageHandlers(bot){
     });
 
     // текст без фото — мягкая подсказка
-    bot.on('text', async (ctx) => {
-        const lang = getLang(ctx.from.id);
+    bot.on('text', async (ctx, next) => {
+        const msg = ctx.message?.text || '';
+
+        // ⚡️ Если это команда — пропускаем дальше (например /stats, /limit, /help)
+        if (msg.startsWith('/')) return next();
+
+        // остальное — обычные текстовые ответы
+        const lang = userLanguage.get(ctx.from.id) || 'en';
         const used = usageForToday(ctx.from.id);
-        if (lang === 'ru') return ctx.reply(`🖼 Пришли фото/скриншот вопроса.\n📊 Сегодня осталось: ${Math.max(DAILY_LIMIT - used, 0)} из ${DAILY_LIMIT}.`);
-        return ctx.reply(`🖼 Please send a photo/screenshot of a question.\n📊 Remaining today: ${Math.max(DAILY_LIMIT - used, 0)} of ${DAILY_LIMIT}.`);
+
+        if (lang === 'ru') {
+            await ctx.reply(
+                `🖼 Пришли фото/скриншот с вопросом и вариантами.\n📊 Сегодня осталось: ${Math.max(DAILY_LIMIT - used, 0)} из ${DAILY_LIMIT}.`
+            );
+        } else {
+            await ctx.reply(
+                `🖼 Please send a photo/screenshot with a question and options.\n📊 Remaining today: ${Math.max(DAILY_LIMIT - used, 0)} of ${DAILY_LIMIT}.`
+            );
+        }
     });
 }
