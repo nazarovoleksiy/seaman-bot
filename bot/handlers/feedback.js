@@ -1,15 +1,13 @@
-// bot/handlers/feedback.js
 import db, { saveFeedback, getLang } from '../../db/database.js';
 
-const pending = new Map();
+const pending = new Map(); // userId -> ждём текст отзыва
 const ADMIN_ID = process.env.ADMIN_ID;
 
 export function registerFeedbackHandler(bot) {
-    // 1) Кнопка "Оставить отзыв" (inline)
+    // inline-кнопка "Оставить отзыв"
     bot.action('fb:start', async (ctx) => {
         const lang = getLang(ctx.from.id);
         pending.set(ctx.from.id, true);
-        // убрать "крутилку" на кнопке
         try { await ctx.answerCbQuery(); } catch {}
         await ctx.reply(lang === 'ru'
             ? '💬 Напиши свой отзыв следующим сообщением.'
@@ -17,10 +15,9 @@ export function registerFeedbackHandler(bot) {
         );
     });
 
-    // 2) /start feedback (если откроют по deeplink)
+    // deeplink /start feedback
     bot.start(async (ctx, next) => {
-        const arg = ctx.startPayload; // ?start=feedback
-        if (arg === 'feedback') {
+        if (ctx.startPayload === 'feedback') {
             const lang = getLang(ctx.from.id);
             pending.set(ctx.from.id, true);
             return ctx.reply(lang === 'ru'
@@ -31,7 +28,7 @@ export function registerFeedbackHandler(bot) {
         return next();
     });
 
-    // 3) Команда /feedback (как и было)
+    // команда /feedback — вручную
     bot.command('feedback', async (ctx) => {
         pending.set(ctx.from.id, true);
         const lang = getLang(ctx.from.id);
@@ -41,7 +38,7 @@ export function registerFeedbackHandler(bot) {
         );
     });
 
-    // 4) Команда /feedbacks (как и было)
+    // команда /feedbacks — последние 10
     bot.command('feedbacks', async (ctx) => {
         const lang = getLang(ctx.from.id);
         try {
@@ -62,10 +59,10 @@ export function registerFeedbackHandler(bot) {
         }
     });
 
-    // 5) Приём текста-отзыва (и уведомление админа)
+    // приём текста-отзыва (с приоритетом и pass-through)
     bot.on('text', async (ctx, next) => {
-        if (ctx.message?.text?.startsWith('/')) return next();
         const uid = ctx.from.id;
+        if (ctx.message?.text?.startsWith('/')) return next();
         if (!pending.has(uid)) return next();
 
         pending.delete(uid);
@@ -77,10 +74,10 @@ export function registerFeedbackHandler(bot) {
         const lang = getLang(uid);
         await ctx.reply(lang === 'ru' ? '🙏 Спасибо за отзыв!' : '🙏 Thanks for your feedback!');
 
-        if (process.env.ADMIN_ID) {
+        if (ADMIN_ID) {
             const who = ctx.from.username ? `@${ctx.from.username}` : `id:${uid}`;
             const note = `🆕 New feedback\n👤 ${who}\n🕒 ${new Date().toISOString()}\n\n💬 ${text}`;
-            try { await ctx.telegram.sendMessage(process.env.ADMIN_ID, note); } catch (e) { console.error(e); }
+            try { await ctx.telegram.sendMessage(ADMIN_ID, note); } catch (e) { console.error('Admin notify error:', e); }
         }
     });
 }

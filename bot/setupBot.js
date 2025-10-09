@@ -5,20 +5,19 @@ import { registerFeedbackHandler } from './handlers/feedback.js';
 import { registerLimitCommand } from './handlers/limit.js';
 import { registerStatsCommand } from './handlers/stats.js';
 
-
 export function setupBot(app) {
     const bot = new Telegraf(process.env.BOT_TOKEN);
 
-    // handlers
+    // ВАЖНО: отзывы — первыми (они тоже ловят text)
     registerFeedbackHandler(bot);
     registerLanguageHandlers(bot);
     registerLimitCommand(bot);
     registerPhotoHandler(bot);
     registerStatsCommand(bot);
 
-    // webhook (или polling локально)
-    const BASE_URL  = process.env.BASE_URL;   // https://<service>.onrender.com
-    const WH_SECRET = process.env.WH_SECRET;  // длинная строка
+    // webhook / polling
+    const BASE_URL  = process.env.BASE_URL;
+    const WH_SECRET = process.env.WH_SECRET;
     const WEBHOOK_PATH = '/tg/webhook';
 
     if (BASE_URL) {

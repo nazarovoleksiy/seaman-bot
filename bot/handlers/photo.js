@@ -1,7 +1,7 @@
-import { getLang, canUseToday, incUsage } from '../../db/database.js';
+import { getLang, canUseLifetime, incUsage } from '../../db/database.js';
 import { askVisionSafe, withConcurrency } from '../../utils/ai.js';
 
-const lastHit = new Map();          // антифлуд
+const lastHit = new Map();   // антифлуд
 const inProgress = new Set();
 const COOLDOWN_MS = 10_000;
 
@@ -45,7 +45,7 @@ Format:
 
 export function registerPhotoHandler(bot){
     bot.on('photo', async (ctx) => {
-        const uid = ctx.from.id;
+        const uid  = ctx.from.id;
         const lang = getLang(uid);
 
         if (!cooldownPassed(uid)) {
@@ -55,11 +55,13 @@ export function registerPhotoHandler(bot){
             return ctx.reply(lang === 'ru' ? '🛠 Уже разбираю предыдущее фото. Дождись ответа.' : '🛠 I’m already analyzing your previous photo. Please wait.');
         }
 
-        const { ok, used, limit } = canUseToday(uid);
+        // пожизненный лимит 50
+        const { ok, used, limit } = canUseLifetime(uid);
         if (!ok) {
-            return ctx.reply(lang === 'ru'
-                ? `🚦 Достигнут дневной лимит ${limit} изображений. Попробуй завтра.`
-                : `🚦 Daily limit of ${limit} images reached. Try again tomorrow.`);
+            const msg = lang === 'ru'
+                ? `🙏 Спасибо за участие! Вы использовали все ${limit} бесплатных запросов.\nНа этом тестирование завершено.`
+                : `🙏 Thank you for participating! You have used all ${limit} free requests.\nThe testing period has ended.`;
+            return ctx.reply(msg);
         }
 
         inProgress.add(uid);
@@ -73,13 +75,16 @@ export function registerPhotoHandler(bot){
 
             const result = await withConcurrency(() => analyzeQuestionImage(fileUrl, lang));
 
+            // учёт использования
             incUsage(uid);
             const leftAfter = Math.max(limit - (used + 1), 0);
-            const suffix = lang === 'ru'
-                ? `\n\n📊 Сегодня осталось: ${leftAfter} из ${limit}.`
-                : `\n\n📊 Remaining today: ${leftAfter} of ${limit}.`;
+            const suffix = (lang === 'ru')
+                ? `\n\n📊 Осталось навсегда: ${leftAfter} из ${limit}.`
+                : `\n\n📊 Lifetime remaining: ${leftAfter} of ${limit}.`;
 
             await ctx.reply(result + suffix);
+
+            // кнопка "Оставить отзыв"
             await ctx.reply(
                 (lang === 'ru' ? '💬 Оставить отзыв?' : '💬 Leave a quick feedback?'),
                 {

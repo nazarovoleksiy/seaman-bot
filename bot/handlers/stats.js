@@ -1,24 +1,17 @@
-// bot/handlers/stats.js
-import { todayUTC } from '../../db/database.js';
-import db, { getLang } from '../../db/database.js';
+import db, { todayUTC, getLang, totalUsage } from '../../db/database.js';
 
 export function registerStatsCommand(bot) {
     bot.command('stats', async (ctx) => {
         try {
-            const totalUsers = db.prepare(
-                'SELECT COUNT(DISTINCT tg_id) AS total FROM usage_log'
-            ).get().total || 0;
-
+            const totalUsers = db.prepare('SELECT COUNT(DISTINCT tg_id) AS total FROM usage_log').get().total || 0;
             const today = todayUTC();
-            const todayCount = db.prepare(
-                'SELECT COALESCE(SUM(count), 0) AS sum FROM usage_log WHERE day=?'
-            ).get(today).sum || 0;
+            const todayCount = db.prepare('SELECT COALESCE(SUM(count),0) AS sum FROM usage_log WHERE day=?').get(today).sum || 0;
+            const myTotal = totalUsage(ctx.from.id);
 
             const lang = getLang(ctx.from.id);
             const msg = (lang === 'ru')
-                ? `📊 Статистика бота:\n👤 Всего пользователей: ${totalUsers}\n🧠 Запросов сегодня: ${todayCount}`
-                : `📊 Bot stats:\n👤 Total users: ${totalUsers}\n🧠 Requests today: ${todayCount}`;
-
+                ? `📊 Статистика:\n👤 Пользователей: ${totalUsers}\n🧠 Сегодня запросов: ${todayCount}\n🫵 Твои всего: ${myTotal}`
+                : `📊 Stats:\n👤 Users: ${totalUsers}\n🧠 Today: ${todayCount}\n🫵 Yours total: ${myTotal}`;
             await ctx.reply(msg);
         } catch (e) {
             console.error('Stats error:', e);

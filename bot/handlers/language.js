@@ -1,8 +1,10 @@
-// bot/handlers/language.js
-import { getLang, setLang, usageForToday, DAILY_LIMIT, trackUser } from '../../db/database.js';
+import { getLang, setLang, trackUser, canUseLifetime } from '../../db/database.js';
 
 export function registerLanguageHandlers(bot){
-    bot.start(async (ctx) => {
+    bot.start(async (ctx, next) => {
+        // если пришли через deeplink /start feedback — пусть обработает feedback.js
+        if (ctx.startPayload === 'feedback') return next();
+
         trackUser(ctx.from.id);
         await ctx.reply(
             '👋 Привет! / Hello!\n\n' +
@@ -15,41 +17,39 @@ export function registerLanguageHandlers(bot){
 
     bot.hears(['🇷🇺 Русский','Русский'], async (ctx) => {
         setLang(ctx.from.id, 'ru');
-        const used = usageForToday(ctx.from.id);
+        const { left, limit } = canUseLifetime(ctx.from.id);
         await ctx.reply(
             `✅ Язык: русский. Пришли скриншот вопроса.\n` +
-            `📊 Сегодня осталось: ${Math.max(DAILY_LIMIT - used, 0)} из ${DAILY_LIMIT}.`
+            `📊 Осталось навсегда: ${left} из ${limit}.`
         );
     });
 
     bot.hears(['🇬🇧 English','English'], async (ctx) => {
         setLang(ctx.from.id, 'en');
-        const used = usageForToday(ctx.from.id);
+        const { left, limit } = canUseLifetime(ctx.from.id);
         await ctx.reply(
             `✅ Language: English. Send a screenshot.\n` +
-            `📊 Remaining today: ${Math.max(DAILY_LIMIT - used, 0)} of ${DAILY_LIMIT}.`
+            `📊 Lifetime remaining: ${left} of ${limit}.`
         );
     });
 
-    // текст без фото — мягкая подсказка
+    // текст (без фото): подсказка + пропуск команд
     bot.on('text', async (ctx, next) => {
         const msg = ctx.message?.text || '';
+        if (msg.startsWith('/')) return next(); // команды дальше
 
-        // ⚡️ Если это команда (/stats, /limit, /feedback и т.п.) — пропускаем дальше
-        if (msg.startsWith('/')) return next();
-
-        const lang = getLang(ctx.from.id);            // <- берём язык из БД
-        const used = usageForToday(ctx.from.id);
+        const lang = getLang(ctx.from.id);
+        const { left, limit } = canUseLifetime(ctx.from.id);
 
         if (lang === 'ru') {
             await ctx.reply(
                 `🖼 Пришли фото/скриншот с вопросом и вариантами.\n` +
-                `📊 Сегодня осталось: ${Math.max(DAILY_LIMIT - used, 0)} из ${DAILY_LIMIT}.`
+                `📊 Осталось навсегда: ${left} из ${limit}.`
             );
         } else {
             await ctx.reply(
                 `🖼 Please send a photo/screenshot with a question and options.\n` +
-                `📊 Remaining today: ${Math.max(DAILY_LIMIT - used, 0)} of ${DAILY_LIMIT}.`
+                `📊 Lifetime remaining: ${left} of ${limit}.`
             );
         }
     });
