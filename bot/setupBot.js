@@ -10,10 +10,10 @@ export function setupBot(app) {
     const bot = new Telegraf(process.env.BOT_TOKEN);
 
     // handlers
-    registerLanguageHandlers(bot);
     registerFeedbackHandler(bot);
+    registerLanguageHandlers(bot);
     registerLimitCommand(bot);
-    registerPhotoHandler(bot); // фото в самом конце
+    registerPhotoHandler(bot);
     registerStatsCommand(bot);
 
     // webhook (или polling локально)
