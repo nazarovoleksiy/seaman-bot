@@ -1,3 +1,4 @@
+// bot/handlers/language.js
 import { getLang, setLang, usageForToday, DAILY_LIMIT, trackUser } from '../../db/database.js';
 
 export function registerLanguageHandlers(bot){
@@ -15,33 +16,40 @@ export function registerLanguageHandlers(bot){
     bot.hears(['🇷🇺 Русский','Русский'], async (ctx) => {
         setLang(ctx.from.id, 'ru');
         const used = usageForToday(ctx.from.id);
-        await ctx.reply(`✅ Язык: русский. Пришли скриншот вопроса.\n📊 Сегодня осталось: ${Math.max(DAILY_LIMIT - used, 0)} из ${DAILY_LIMIT}.`);
+        await ctx.reply(
+            `✅ Язык: русский. Пришли скриншот вопроса.\n` +
+            `📊 Сегодня осталось: ${Math.max(DAILY_LIMIT - used, 0)} из ${DAILY_LIMIT}.`
+        );
     });
 
     bot.hears(['🇬🇧 English','English'], async (ctx) => {
         setLang(ctx.from.id, 'en');
         const used = usageForToday(ctx.from.id);
-        await ctx.reply(`✅ Language: English. Send a screenshot.\n📊 Remaining today: ${Math.max(DAILY_LIMIT - used, 0)} of ${DAILY_LIMIT}.`);
+        await ctx.reply(
+            `✅ Language: English. Send a screenshot.\n` +
+            `📊 Remaining today: ${Math.max(DAILY_LIMIT - used, 0)} of ${DAILY_LIMIT}.`
+        );
     });
 
     // текст без фото — мягкая подсказка
     bot.on('text', async (ctx, next) => {
         const msg = ctx.message?.text || '';
 
-        // ⚡️ Если это команда — пропускаем дальше (например /stats, /limit, /help)
+        // ⚡️ Если это команда (/stats, /limit, /feedback и т.п.) — пропускаем дальше
         if (msg.startsWith('/')) return next();
 
-        // остальное — обычные текстовые ответы
-        const lang = userLanguage.get(ctx.from.id) || 'en';
+        const lang = getLang(ctx.from.id);            // <- берём язык из БД
         const used = usageForToday(ctx.from.id);
 
         if (lang === 'ru') {
             await ctx.reply(
-                `🖼 Пришли фото/скриншот с вопросом и вариантами.\n📊 Сегодня осталось: ${Math.max(DAILY_LIMIT - used, 0)} из ${DAILY_LIMIT}.`
+                `🖼 Пришли фото/скриншот с вопросом и вариантами.\n` +
+                `📊 Сегодня осталось: ${Math.max(DAILY_LIMIT - used, 0)} из ${DAILY_LIMIT}.`
             );
         } else {
             await ctx.reply(
-                `🖼 Please send a photo/screenshot with a question and options.\n📊 Remaining today: ${Math.max(DAILY_LIMIT - used, 0)} of ${DAILY_LIMIT}.`
+                `🖼 Please send a photo/screenshot with a question and options.\n` +
+                `📊 Remaining today: ${Math.max(DAILY_LIMIT - used, 0)} of ${DAILY_LIMIT}.`
             );
         }
     });
