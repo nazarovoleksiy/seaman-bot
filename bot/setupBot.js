@@ -3,6 +3,8 @@ import { registerLanguageHandlers } from './handlers/language.js';
 import { registerPhotoHandler } from './handlers/photo.js';
 import { registerFeedbackHandler } from './handlers/feedback.js';
 import { registerLimitCommand } from './handlers/limit.js';
+import { registerStatsCommand } from './handlers/stats.js';
+
 
 export function setupBot(app) {
     const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -12,6 +14,7 @@ export function setupBot(app) {
     registerFeedbackHandler(bot);
     registerLimitCommand(bot);
     registerPhotoHandler(bot); // фото в самом конце
+    registerStatsCommand(bot);
 
     // webhook (или polling локально)
     const BASE_URL  = process.env.BASE_URL;   // https://<service>.onrender.com
