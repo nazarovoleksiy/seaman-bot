@@ -80,6 +80,16 @@ export function registerPhotoHandler(bot){
                 : `\n\n📊 Remaining today: ${leftAfter} of ${limit}.`;
 
             await ctx.reply(result + suffix);
+            await ctx.reply(
+                (lang === 'ru' ? '💬 Оставить отзыв?' : '💬 Leave a quick feedback?'),
+                {
+                    reply_markup: {
+                        inline_keyboard: [[
+                            { text: (lang === 'ru' ? 'Оставить отзыв' : 'Leave feedback'), callback_data: 'fb:start' }
+                        ]]
+                    }
+                }
+            );
         } catch (e) {
             if (e.message === 'Overloaded') {
                 return ctx.reply(lang === 'ru' ? '🧯 Высокая нагрузка, попробуй через минуту.' : '🧯 High load, please try in a minute.');
