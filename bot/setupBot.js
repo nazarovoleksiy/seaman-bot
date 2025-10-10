@@ -5,6 +5,7 @@ import { registerFeedbackHandler } from './handlers/feedback.js';
 import { registerLimitCommand } from './handlers/limit.js';
 import { registerStatsCommand } from './handlers/stats.js';
 import { registerBuyHandler } from './handlers/buy.js';
+import { registerAdminHandlers } from './handlers/admin.js';
 
 export function setupBot(app){
     const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -16,6 +17,8 @@ export function setupBot(app){
     registerPhotoHandler(bot);
     registerStatsCommand(bot);
     registerBuyHandler(bot);
+    registerAdminHandlers(bot);
+
 
     // webhook
     const BASE_URL  = process.env.BASE_URL;
