@@ -1,72 +1,48 @@
-import { getLang, setLang, trackUser, canUseLifetime } from '../../db/database.js';
+import { trackUser, setLang, getLang, totalUsage, FREE_TOTAL_LIMIT } from '../../db/database.js';
 
 export function registerLanguageHandlers(bot){
-    bot.start(async (ctx, next) => {
-        // если пришли через deeplink /start feedback — пусть обработает feedback.js
-        if (ctx.startPayload === 'feedback') return next();
-
-        trackUser(ctx.from.id);
+    bot.start(async (ctx) => {
+        trackUser(ctx.from.id, ctx.from.username);
         await ctx.reply(
             '👋 Привіт! / Привет! / Hello!\n\n' +
-            'Я — AI-помічник: розберу тест за фото, підкажу правильну відповідь і коротко поясню.\n' +
-            'Я — AI помощник: разберу тест по фото, подскажу правильный ответ и кратко объясню.\n' +
-            'I’m your AI assistant: send a screenshot of a question — I’ll solve and explain.\n\n' +
+            'Отправь фото вопроса с вариантами ответов — я найду правильный и коротко объясню почему.\n\n' +
             '🌍 Choose your language / Обери мову / Выбери язык:\n' +
             '🇬🇧 English | 🇺🇦 Українська | 🇷🇺 Русский',
-            { reply_markup: { keyboard: [['🇬🇧 English', '🇺🇦 Українська', '🇷🇺 Русский']], one_time_keyboard: true, resize_keyboard: true } }
-        );
-    });
-
-    bot.hears(['🇺🇦 Українська','Українська'], async (ctx) => {
-        setLang(ctx.from.id, 'uk');
-        const { left, limit } = canUseLifetime(ctx.from.id);
-        await ctx.reply(
-            `✅ Мова: українська. Надішли скріншот питання.\n` +
-            `📊 Залишилось назавжди: ${left} із ${limit}.`
+            { reply_markup: { keyboard: [['🇬🇧 English','🇺🇦 Українська','🇷🇺 Русский']], one_time_keyboard: true, resize_keyboard: true } }
         );
     });
 
     bot.hears(['🇷🇺 Русский','Русский'], async (ctx) => {
         setLang(ctx.from.id, 'ru');
-        const { left, limit } = canUseLifetime(ctx.from.id);
-        await ctx.reply(
-            `✅ Язык: русский. Пришли скриншот вопроса.\n` +
-            `📊 Осталось навсегда: ${left} из ${limit}.`
-        );
+        const used = totalUsage(ctx.from.id);
+        await ctx.reply(`✅ Язык: русский. Пришли скрин с вопросом.\n📊 Осталось навсегда: ${Math.max(FREE_TOTAL_LIMIT - used, 0)} из ${FREE_TOTAL_LIMIT}.`);
+    });
+
+    bot.hears(['🇺🇦 Українська','Українська'], async (ctx) => {
+        setLang(ctx.from.id, 'uk');
+        const used = totalUsage(ctx.from.id);
+        await ctx.reply(`✅ Мова: українська. Надішли скрін питання.\n📊 Залишилось назавжди: ${Math.max(FREE_TOTAL_LIMIT - used, 0)} із ${FREE_TOTAL_LIMIT}.`);
     });
 
     bot.hears(['🇬🇧 English','English'], async (ctx) => {
         setLang(ctx.from.id, 'en');
-        const { left, limit } = canUseLifetime(ctx.from.id);
-        await ctx.reply(
-            `✅ Language: English. Send a screenshot.\n` +
-            `📊 Lifetime remaining: ${left} of ${limit}.`
-        );
+        const used = totalUsage(ctx.from.id);
+        await ctx.reply(`✅ Language: English. Send a question screenshot.\n📊 Lifetime remaining: ${Math.max(FREE_TOTAL_LIMIT - used, 0)} of ${FREE_TOTAL_LIMIT}.`);
     });
 
-    // текст (без фото): подсказка + пропуск команд
+    // мягкая подсказка для обычного текста
     bot.on('text', async (ctx, next) => {
         const msg = ctx.message?.text || '';
-        if (msg.startsWith('/')) return next(); // команды дальше
+        if (msg.startsWith('/')) return next();
 
         const lang = getLang(ctx.from.id);
-        const { left, limit } = canUseLifetime(ctx.from.id);
-
+        const used = totalUsage(ctx.from.id);
         if (lang === 'ru') {
-            await ctx.reply(
-                `🖼 Пришли фото/скриншот с вопросом и вариантами.\n` +
-                `📊 Осталось навсегда: ${left} из ${limit}.`
-            );
+            await ctx.reply(`🖼 Пришли фото/скриншот вопроса с вариантами (A/B/C/D).\n📊 Осталось навсегда: ${Math.max(FREE_TOTAL_LIMIT - used, 0)} из ${FREE_TOTAL_LIMIT}.`);
         } else if (lang === 'uk') {
-            await ctx.reply(
-                `🖼 Надішли фото/скрін питання з варіантами.\n` +
-                `📊 Залишилось назавжди: ${left} із ${limit}.`
-            );
+            await ctx.reply(`🖼 Надішли фото/скрін питання з варіантами (A/B/C/D).\n📊 Залишилось назавжди: ${Math.max(FREE_TOTAL_LIMIT - used, 0)} із ${FREE_TOTAL_LIMIT}.`);
         } else {
-            await ctx.reply(
-                `🖼 Please send a photo/screenshot with a question and options.\n` +
-                `📊 Lifetime remaining: ${left} of ${limit}.`
-            );
+            await ctx.reply(`🖼 Please send a photo/screenshot with multiple-choice options (A/B/C/D).\n📊 Lifetime remaining: ${Math.max(FREE_TOTAL_LIMIT - used, 0)} of ${FREE_TOTAL_LIMIT}.`);
         }
     });
 }

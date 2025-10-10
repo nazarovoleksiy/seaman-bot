@@ -4,26 +4,28 @@ import { registerPhotoHandler } from './handlers/photo.js';
 import { registerFeedbackHandler } from './handlers/feedback.js';
 import { registerLimitCommand } from './handlers/limit.js';
 import { registerStatsCommand } from './handlers/stats.js';
+import { registerBuyHandler } from './handlers/buy.js';
 
-export function setupBot(app) {
+export function setupBot(app){
     const bot = new Telegraf(process.env.BOT_TOKEN);
 
-    // ВАЖНО: отзывы — первыми (они тоже ловят text)
+    // handlers
     registerFeedbackHandler(bot);
     registerLanguageHandlers(bot);
     registerLimitCommand(bot);
     registerPhotoHandler(bot);
     registerStatsCommand(bot);
+    registerBuyHandler(bot);
 
-    // webhook / polling
+    // webhook
     const BASE_URL  = process.env.BASE_URL;
     const WH_SECRET = process.env.WH_SECRET;
     const WEBHOOK_PATH = '/tg/webhook';
 
     if (BASE_URL) {
-        const url = `${BASE_URL.replace(/\/+$/, '')}${WEBHOOK_PATH}`;
+        const url = `${BASE_URL.replace(/\/+$/,'')}${WEBHOOK_PATH}`;
 
-        app.post(WEBHOOK_PATH, (req, res) => {
+        app.post(WEBHOOK_PATH, (req,res) => {
             const headerSecret = req.get('x-telegram-bot-api-secret-token');
             if (!WH_SECRET || headerSecret === WH_SECRET) {
                 bot.handleUpdate(req.body);
@@ -33,10 +35,10 @@ export function setupBot(app) {
         });
 
         bot.telegram.setWebhook(url, { secret_token: WH_SECRET })
-            .then(() => console.log('✅ Webhook set to', url))
-            .catch(err => console.error('❌ Webhook set error:', err));
+            .then(()=>console.log('✅ Webhook set to', url))
+            .catch(err=>console.error('❌ Webhook set error:', err));
     } else {
-        bot.launch().then(() => console.log('✅ Bot polling (local mode)'));
+        bot.launch().then(()=>console.log('✅ Bot polling (local mode)'));
     }
 
     return bot;

@@ -5,14 +5,12 @@ import { setupBot } from './bot/setupBot.js';
 const app = express();
 app.use(express.json());
 
-// health
-app.get('/', (_, res) => res.send('Seaman Assistant OK'));
+app.get('/', (_, res) => res.send('NovaLearn OK'));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log('⚙️ HTTP on', PORT));
 
-// сборка бота + webhook/polling
 const bot = setupBot(app);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`⚙️ HTTP on ${PORT}`));
-
+// корректное завершение
 process.once('SIGINT',  () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
