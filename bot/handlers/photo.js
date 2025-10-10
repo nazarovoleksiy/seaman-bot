@@ -104,7 +104,18 @@ export function registerPhotoHandler(bot){
             await ctx.reply(result, {
                 reply_markup: {
                     inline_keyboard: [[
-                        { text: lang==='ru'?'Оставить отзыв':'Leave feedback', callback_data:'fb:start' }
+                        {
+                            text: lang === 'ru' ? 'Оставить отзыв'
+                                : lang === 'uk' ? 'Залишити відгук'
+                                    : 'Leave feedback',
+                            callback_data: 'fb:start'
+                        },
+                        {
+                            text: lang === 'ru' ? '❓ Помощь'
+                                : lang === 'uk' ? '❓ Допомога'
+                                    : '❓ Help',
+                            callback_data: 'help:open'
+                        }
                     ]]
                 }
             });

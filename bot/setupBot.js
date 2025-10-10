@@ -6,6 +6,8 @@ import { registerLimitCommand } from './handlers/limit.js';
 import { registerStatsCommand } from './handlers/stats.js';
 import { registerBuyHandler } from './handlers/buy.js';
 import { registerAdminHandlers } from './handlers/admin.js';
+import { registerAccessCommand } from './handlers/access.js';
+import { registerHelpHandler } from './handlers/help.js';
 
 export function setupBot(app){
     const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -18,6 +20,8 @@ export function setupBot(app){
     registerStatsCommand(bot);
     registerBuyHandler(bot);
     registerAdminHandlers(bot);
+    registerAccessCommand(bot);
+    registerHelpHandler(bot);
 
 
     // webhook
