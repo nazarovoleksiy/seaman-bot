@@ -16,6 +16,36 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 
+// helper: проверяем, есть ли колонка
+function columnExists(table, col) {
+    try {
+        const rows = db.prepare(`PRAGMA table_info(${table})`).all();
+        return rows.some(r => r.name === col);
+    } catch { return false; }
+}
+
+// --- миграции существующей БД ---
+try {
+    // users.username
+    if (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='users'`).get()) {
+        if (!columnExists('users', 'username')) {
+            db.exec(`ALTER TABLE users ADD COLUMN username TEXT;`);
+            console.log('Migrated: users.username added');
+        }
+        if (!columnExists('users', 'first_seen')) {
+            db.exec(`ALTER TABLE users ADD COLUMN first_seen TEXT;`);
+        }
+        if (!columnExists('users', 'last_active')) {
+            db.exec(`ALTER TABLE users ADD COLUMN last_active TEXT;`);
+        }
+    }
+
+    // usage_log: если у тебя старая схема с day/count, оставь как есть — ниже CREATE IF NOT EXISTS не тронет.
+    // entitlements/payments/feedback создадутся, если их нет.
+} catch (e) {
+    console.error('DB migration error:', e);
+}
+
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   tg_id TEXT PRIMARY KEY,
