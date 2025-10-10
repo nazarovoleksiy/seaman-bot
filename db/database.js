@@ -5,6 +5,21 @@ import fs from 'fs';
 const DB_PATH = process.env.DATABASE_URL || './data.db';
 console.log('DB PATH:', DB_PATH);
 
+// === Автоматический бэкап БД при старте (один раз) ===
+try {
+    const backupPath = DB_PATH.replace(/\.db$/, '.db.bak');
+    if (fs.existsSync(DB_PATH) && !fs.existsSync(backupPath)) {
+        fs.copyFileSync(DB_PATH, backupPath);
+        console.log('💾 Backup created at', backupPath);
+    } else if (fs.existsSync(backupPath)) {
+        console.log('✅ Backup already exists at', backupPath);
+    } else {
+        console.log('⚠️ Database file not found, no backup created.');
+    }
+} catch (e) {
+    console.error('Backup creation error:', e);
+}
+
 // (опц.) разовая миграция локальной БД -> /data на Render
 try {
     if (DB_PATH === '/data/data.db' && fs.existsSync('./data.db') && !fs.existsSync('/data/data.db')) {
