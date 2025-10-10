@@ -1,10 +1,11 @@
+// db/database.js
 import Database from 'better-sqlite3';
 import fs from 'fs';
 
 const DB_PATH = process.env.DATABASE_URL || './data.db';
 console.log('DB PATH:', DB_PATH);
 
-// миграция, если нужно
+// (опц.) разовая миграция локальной БД -> на диск /data
 try {
     if (DB_PATH === '/data/data.db' && fs.existsSync('./data.db') && !fs.existsSync('/data/data.db')) {
         fs.copyFileSync('./data.db', '/data/data.db');
@@ -16,36 +17,48 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 
-// helper: проверяем, есть ли колонка
+// ---------------------- MIGRATIONS ----------------------
+function tableExists(name) {
+    return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name);
+}
 function columnExists(table, col) {
     try {
         const rows = db.prepare(`PRAGMA table_info(${table})`).all();
         return rows.some(r => r.name === col);
     } catch { return false; }
 }
+function indexExists(name) {
+    return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name=?`).get(name);
+}
 
-// --- миграции существующей БД ---
 try {
-    // users.username
-    if (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='users'`).get()) {
-        if (!columnExists('users', 'username')) {
-            db.exec(`ALTER TABLE users ADD COLUMN username TEXT;`);
-            console.log('Migrated: users.username added');
-        }
-        if (!columnExists('users', 'first_seen')) {
-            db.exec(`ALTER TABLE users ADD COLUMN first_seen TEXT;`);
-        }
-        if (!columnExists('users', 'last_active')) {
-            db.exec(`ALTER TABLE users ADD COLUMN last_active TEXT;`);
-        }
+    // users
+    if (tableExists('users')) {
+        if (!columnExists('users', 'username'))   db.exec(`ALTER TABLE users ADD COLUMN username TEXT;`);
+        if (!columnExists('users', 'first_seen')) db.exec(`ALTER TABLE users ADD COLUMN first_seen TEXT;`);
+        if (!columnExists('users', 'last_active'))db.exec(`ALTER TABLE users ADD COLUMN last_active TEXT;`);
     }
 
-    // usage_log: если у тебя старая схема с day/count, оставь как есть — ниже CREATE IF NOT EXISTS не тронет.
-    // entitlements/payments/feedback создадутся, если их нет.
+    // usage_log: раньше могла быть схема без UNIQUE. Добавляем индекс.
+    if (tableExists('usage_log')) {
+        if (!indexExists('uq_usage_tg')) {
+            // если уже есть дубли tg_id, уберём их, оставив максимальный count
+            db.exec(`
+        CREATE TEMP TABLE _usage_dedup AS
+        SELECT tg_id, MAX(count) AS count FROM usage_log GROUP BY tg_id;
+        DELETE FROM usage_log;
+        INSERT INTO usage_log (tg_id, count) SELECT tg_id, count FROM _usage_dedup;
+        DROP TABLE _usage_dedup;
+      `);
+            db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_tg ON usage_log(tg_id);`);
+            console.log('Migrated: UNIQUE index uq_usage_tg on usage_log(tg_id) created');
+        }
+    }
 } catch (e) {
     console.error('DB migration error:', e);
 }
 
+// ---------------------- SCHEMA (idempotent) ----------------------
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   tg_id TEXT PRIMARY KEY,
@@ -58,8 +71,9 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS usage_log (
   id INTEGER PRIMARY KEY,
   tg_id TEXT NOT NULL,
-  count INTEGER NOT NULL DEFAULT 0 -- lifetime usage
+  count INTEGER NOT NULL DEFAULT 0
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_tg ON usage_log(tg_id);
 
 CREATE TABLE IF NOT EXISTS feedback (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,12 +83,11 @@ CREATE TABLE IF NOT EXISTS feedback (
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- платные права
 CREATE TABLE IF NOT EXISTS entitlements (
   tg_id TEXT NOT NULL,
   kind TEXT NOT NULL,              -- 'time' | 'credits'
   credits_left INTEGER,
-  expires_at TEXT,
+  expires_at TEXT,                 -- for 'time'
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_ent_tg ON entitlements(tg_id);
@@ -83,14 +96,15 @@ CREATE TABLE IF NOT EXISTS payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tg_id TEXT NOT NULL,
   plan TEXT NOT NULL,
-  amount_stars INTEGER,            -- если будешь хранить Stars
-  amount_cents INTEGER,            -- если провайдер в валютах
+  amount_stars INTEGER,            -- если когда-то будут Stars
+  amount_cents INTEGER,            -- для провайдера (USD/EUR в центах)
   currency TEXT,
   status TEXT DEFAULT 'paid',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 `);
 
+// ---------------------- USERS ----------------------
 export function trackUser(tgId, username) {
     db.prepare(`
     INSERT INTO users (tg_id, username, first_seen, last_active)
@@ -109,24 +123,28 @@ export function getLang(tgId){
     return row?.language || 'en';
 }
 
-// lifetime usage
+// ---------------------- FREE LIFETIME LIMIT ----------------------
 export const FREE_TOTAL_LIMIT = Number(process.env.FREE_TOTAL_LIMIT || 50);
+
 export function totalUsage(tgId){
     return db.prepare(`SELECT count FROM usage_log WHERE tg_id=?`).get(String(tgId))?.count || 0;
 }
-export function incUsage(tgId){
-    db.prepare(`
-    INSERT INTO usage_log (tg_id, count) VALUES (?,1)
-    ON CONFLICT(tg_id) DO UPDATE SET count = count + 1
-  `).run(String(tgId));
+
+// безопасное увеличение (работает даже без UPSERT)
+const qUpdUsage = db.prepare('UPDATE usage_log SET count = count + 1 WHERE tg_id = ?');
+const qInsUsage = db.prepare('INSERT INTO usage_log (tg_id, count) VALUES (?, 1)');
+export function incUsage(tgId) {
+    const r = qUpdUsage.run(String(tgId));
+    if (r.changes === 0) qInsUsage.run(String(tgId));
 }
+
 export function canUseLifetime(tgId){
     const used = totalUsage(tgId);
     const limit = FREE_TOTAL_LIMIT;
     return { ok: used < limit, used, limit, left: Math.max(limit - used, 0) };
 }
 
-// feedback
+// ---------------------- FEEDBACK ----------------------
 export function saveFeedback(tgId, username, text){
     db.prepare(`INSERT INTO feedback (tg_id, username, text) VALUES (?,?,?)`)
         .run(String(tgId), username || null, text);
@@ -135,7 +153,7 @@ export function listFeedback(limit=20){
     return db.prepare(`SELECT * FROM feedback ORDER BY id DESC LIMIT ?`).all(limit);
 }
 
-// entitlements
+// ---------------------- ENTITLEMENTS (PAID ACCESS) ----------------------
 export function hasTimePass(tgId){
     return !!db.prepare(`
     SELECT 1 FROM entitlements
@@ -179,7 +197,39 @@ export function logPayment({ tgId, plan, amountStars=null, amountCents=null, cur
         .run(String(tgId), plan, amountStars, amountCents, currency);
 }
 
-// stats
+// агрегаты для /stats
 export function countUsers(){
     return db.prepare(`SELECT COUNT(*) AS c FROM users`).get().c || 0;
 }
+export function countActiveTimePasses(){
+    return db.prepare(`
+    SELECT COUNT(*) AS c FROM (
+      SELECT tg_id FROM entitlements
+      WHERE kind='time' AND expires_at > datetime('now')
+      GROUP BY tg_id
+    )
+  `).get().c || 0;
+}
+export function sumCreditsLeftAll(){
+    return db.prepare(`
+    SELECT COALESCE(SUM(credits_left),0) AS s
+    FROM entitlements
+    WHERE kind='credits' AND credits_left > 0
+  `).get().s || 0;
+}
+export function myCreditsLeft(tgId){
+    return creditsLeft(tgId);
+}
+export function myTimePassUntil(tgId){
+    return timePassUntil(tgId);
+}
+export function paymentsSummary(){
+    // количество платежей и суммы по валютам
+    return db.prepare(`
+    SELECT currency, COUNT(*) AS cnt, COALESCE(SUM(amount_cents),0) AS sum_cents
+    FROM payments
+    GROUP BY currency
+  `).all();
+}
+
+export default db;
