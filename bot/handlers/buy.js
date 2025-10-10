@@ -41,8 +41,8 @@ export function registerBuyHandler(bot){
             description: 'NovaLearn access',
             payload: `plan:${key}`,
             currency: plan.currency,
-            prices: [{ label: title, amount: plan.amountCents }], // 199 → $1.99
-            // provider_token не указываем здесь — он привязан в BotFather
+            prices: [{ label: title, amount: plan.amountCents }],
+            provider_token: process.env.PAYMENT_PROVIDER_TOKEN, // ✅ вот эта строка — обязательна
             start_parameter: `buy_${key}`
         });
     });
