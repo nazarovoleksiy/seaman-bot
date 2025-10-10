@@ -5,7 +5,7 @@ import fs from 'fs';
 const DB_PATH = process.env.DATABASE_URL || './data.db';
 console.log('DB PATH:', DB_PATH);
 
-// (опц.) разовая миграция локальной БД -> на диск /data
+// (опц.) разовая миграция локальной БД -> /data на Render
 try {
     if (DB_PATH === '/data/data.db' && fs.existsSync('./data.db') && !fs.existsSync('/data/data.db')) {
         fs.copyFileSync('./data.db', '/data/data.db');
@@ -17,7 +17,7 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 
-// ---------------------- MIGRATIONS ----------------------
+// ---------------------- HELPERS ----------------------
 function tableExists(name) {
     return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name);
 }
@@ -31,6 +31,7 @@ function indexExists(name) {
     return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name=?`).get(name);
 }
 
+// ---------------------- MIGRATIONS ----------------------
 try {
     // users
     if (tableExists('users')) {
@@ -39,26 +40,43 @@ try {
         if (!columnExists('users', 'last_active'))db.exec(`ALTER TABLE users ADD COLUMN last_active TEXT;`);
     }
 
-    // usage_log: раньше могла быть схема без UNIQUE. Добавляем индекс.
-    if (tableExists('usage_log')) {
-        if (!indexExists('uq_usage_tg')) {
-            // если уже есть дубли tg_id, уберём их, оставив максимальный count
-            db.exec(`
-        CREATE TEMP TABLE _usage_dedup AS
-        SELECT tg_id, MAX(count) AS count FROM usage_log GROUP BY tg_id;
-        DELETE FROM usage_log;
-        INSERT INTO usage_log (tg_id, count) SELECT tg_id, count FROM _usage_dedup;
-        DROP TABLE _usage_dedup;
-      `);
-            db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_tg ON usage_log(tg_id);`);
-            console.log('Migrated: UNIQUE index uq_usage_tg on usage_log(tg_id) created');
-        }
+    // usage_log: если старая схема с day -> мигрируем в пожизненную без day
+    if (tableExists('usage_log') && columnExists('usage_log', 'day')) {
+        console.log('Migrating usage_log (daily -> lifetime)…');
+        db.exec(`
+      CREATE TABLE IF NOT EXISTS usage_log_new (
+        id INTEGER PRIMARY KEY,
+        tg_id TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO usage_log_new (tg_id, count)
+      SELECT tg_id, COALESCE(SUM(count),0) AS total
+      FROM usage_log
+      GROUP BY tg_id;
+
+      DROP TABLE usage_log;
+      ALTER TABLE usage_log_new RENAME TO usage_log;
+    `);
+    }
+
+    // добавляем уникальный индекс под UPSERT/anti-dup
+    if (tableExists('usage_log') && !indexExists('uq_usage_tg')) {
+        db.exec(`
+      CREATE TEMP TABLE _usage_dedup AS
+      SELECT tg_id, MAX(count) AS count FROM usage_log GROUP BY tg_id;
+      DELETE FROM usage_log;
+      INSERT INTO usage_log (tg_id, count) SELECT tg_id, count FROM _usage_dedup;
+      DROP TABLE _usage_dedup;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_tg ON usage_log(tg_id);
+    `);
+        console.log('usage_log: UNIQUE index created');
     }
 } catch (e) {
     console.error('DB migration error:', e);
 }
 
-// ---------------------- SCHEMA (idempotent) ----------------------
+// ---------------------- SCHEMA ----------------------
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   tg_id TEXT PRIMARY KEY,
@@ -96,8 +114,8 @@ CREATE TABLE IF NOT EXISTS payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tg_id TEXT NOT NULL,
   plan TEXT NOT NULL,
-  amount_stars INTEGER,            -- если когда-то будут Stars
-  amount_cents INTEGER,            -- для провайдера (USD/EUR в центах)
+  amount_stars INTEGER,
+  amount_cents INTEGER,
   currency TEXT,
   status TEXT DEFAULT 'paid',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -130,7 +148,6 @@ export function totalUsage(tgId){
     return db.prepare(`SELECT count FROM usage_log WHERE tg_id=?`).get(String(tgId))?.count || 0;
 }
 
-// безопасное увеличение (работает даже без UPSERT)
 const qUpdUsage = db.prepare('UPDATE usage_log SET count = count + 1 WHERE tg_id = ?');
 const qInsUsage = db.prepare('INSERT INTO usage_log (tg_id, count) VALUES (?, 1)');
 export function incUsage(tgId) {
@@ -197,7 +214,7 @@ export function logPayment({ tgId, plan, amountStars=null, amountCents=null, cur
         .run(String(tgId), plan, amountStars, amountCents, currency);
 }
 
-// агрегаты для /stats
+// ---------------------- STATS ----------------------
 export function countUsers(){
     return db.prepare(`SELECT COUNT(*) AS c FROM users`).get().c || 0;
 }
@@ -224,7 +241,6 @@ export function myTimePassUntil(tgId){
     return timePassUntil(tgId);
 }
 export function paymentsSummary(){
-    // количество платежей и суммы по валютам
     return db.prepare(`
     SELECT currency, COUNT(*) AS cnt, COALESCE(SUM(amount_cents),0) AS sum_cents
     FROM payments
