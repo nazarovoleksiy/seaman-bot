@@ -5,7 +5,7 @@ import fs from 'fs';
 const DB_PATH = process.env.DATABASE_URL || './data.db';
 console.log('DB PATH:', DB_PATH);
 
-// === Автоматический бэкап БД при старте (один раз) ===
+// ---- one-time backup on start ----
 try {
     const backupPath = DB_PATH.replace(/\.db$/, '.db.bak');
     if (fs.existsSync(DB_PATH) && !fs.existsSync(backupPath)) {
@@ -20,19 +20,21 @@ try {
     console.error('Backup creation error:', e);
 }
 
-// (опц.) разовая миграция локальной БД -> /data на Render
+// (опц.) миграция локальной БД -> /data (Render)
 try {
     if (DB_PATH === '/data/data.db' && fs.existsSync('./data.db') && !fs.existsSync('/data/data.db')) {
         fs.copyFileSync('./data.db', '/data/data.db');
         console.log('Migrated ./data.db -> /data/data.db');
     }
-} catch (e) { console.error('DB migrate copy error:', e); }
+} catch (e) {
+    console.error('DB migrate copy error:', e);
+}
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 
-// ---------------------- HELPERS ----------------------
+// ------------ helpers -------------
 function tableExists(name) {
     return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name);
 }
@@ -46,16 +48,16 @@ function indexExists(name) {
     return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name=?`).get(name);
 }
 
-// ---------------------- MIGRATIONS ----------------------
+// ------------ MIGRATIONS -------------
 try {
-    // users
+    // users: ensure columns
     if (tableExists('users')) {
         if (!columnExists('users', 'username'))   db.exec(`ALTER TABLE users ADD COLUMN username TEXT;`);
         if (!columnExists('users', 'first_seen')) db.exec(`ALTER TABLE users ADD COLUMN first_seen TEXT;`);
         if (!columnExists('users', 'last_active'))db.exec(`ALTER TABLE users ADD COLUMN last_active TEXT;`);
     }
 
-    // usage_log: если старая схема с day -> мигрируем в пожизненную без day
+    // usage_log: daily -> lifetime
     if (tableExists('usage_log') && columnExists('usage_log', 'day')) {
         console.log('Migrating usage_log (daily -> lifetime)…');
         db.exec(`
@@ -74,7 +76,7 @@ try {
     `);
     }
 
-    // добавляем уникальный индекс под UPSERT/anti-dup
+    // usage_log: unique index & dedup
     if (tableExists('usage_log') && !indexExists('uq_usage_tg')) {
         db.exec(`
       CREATE TEMP TABLE _usage_dedup AS
@@ -91,7 +93,7 @@ try {
     console.error('DB migration error:', e);
 }
 
-// ---------------------- SCHEMA ----------------------
+// ------------ SCHEMA -------------
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   tg_id TEXT PRIMARY KEY,
@@ -120,7 +122,7 @@ CREATE TABLE IF NOT EXISTS entitlements (
   tg_id TEXT NOT NULL,
   kind TEXT NOT NULL,              -- 'time' | 'credits'
   credits_left INTEGER,
-  expires_at TEXT,                 -- for 'time'
+  expires_at TEXT,                 -- 'YYYY-MM-DD HH:MM:SS' UTC for 'time'
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_ent_tg ON entitlements(tg_id);
@@ -132,12 +134,14 @@ CREATE TABLE IF NOT EXISTS payments (
   amount_stars INTEGER,
   amount_cents INTEGER,
   currency TEXT,
+  provider_charge_id TEXT,
+  telegram_charge_id TEXT,
   status TEXT DEFAULT 'paid',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 `);
 
-// ---------------------- USERS ----------------------
+// ------------ USERS -------------
 export function trackUser(tgId, username) {
     db.prepare(`
     INSERT INTO users (tg_id, username, first_seen, last_active)
@@ -156,7 +160,7 @@ export function getLang(tgId){
     return row?.language || 'en';
 }
 
-// ---------------------- FREE LIFETIME LIMIT ----------------------
+// ------------ FREE LIFETIME LIMIT -------------
 export const FREE_TOTAL_LIMIT = Number(process.env.FREE_TOTAL_LIMIT || 50);
 
 export function totalUsage(tgId){
@@ -170,13 +174,14 @@ export function incUsage(tgId) {
     if (r.changes === 0) qInsUsage.run(String(tgId));
 }
 
+// (если надо где-то) проверка на возможность
 export function canUseLifetime(tgId){
     const used = totalUsage(tgId);
     const limit = FREE_TOTAL_LIMIT;
     return { ok: used < limit, used, limit, left: Math.max(limit - used, 0) };
 }
 
-// ---------------------- FEEDBACK ----------------------
+// ------------ FEEDBACK -------------
 export function saveFeedback(tgId, username, text){
     db.prepare(`INSERT INTO feedback (tg_id, username, text) VALUES (?,?,?)`)
         .run(String(tgId), username || null, text);
@@ -185,7 +190,7 @@ export function listFeedback(limit=20){
     return db.prepare(`SELECT * FROM feedback ORDER BY id DESC LIMIT ?`).all(limit);
 }
 
-// ---------------------- ENTITLEMENTS (PAID ACCESS) ----------------------
+// ------------ ENTITLEMENTS (PAID ACCESS) -------------
 export function hasTimePass(tgId){
     return !!db.prepare(`
     SELECT 1 FROM entitlements
@@ -195,10 +200,12 @@ export function hasTimePass(tgId){
 export function timePassUntil(tgId){
     return db.prepare(`
     SELECT expires_at FROM entitlements
-    WHERE tg_id=? AND kind='time' AND expires_at > datetime('now')
+    WHERE tg_id=? AND kind='time'
     ORDER BY expires_at DESC LIMIT 1
   `).get(String(tgId))?.expires_at || null;
 }
+export const myTimePassUntil = timePassUntil;
+
 export function creditsLeft(tgId){
     return db.prepare(`
     SELECT COALESCE(SUM(credits_left),0) AS left
@@ -206,6 +213,8 @@ export function creditsLeft(tgId){
     WHERE tg_id=? AND kind='credits' AND credits_left > 0
   `).get(String(tgId)).left || 0;
 }
+export const myCreditsLeft = creditsLeft;
+
 export function consumeOneCredit(tgId){
     const row = db.prepare(`
     SELECT rowid, credits_left FROM entitlements
@@ -216,20 +225,58 @@ export function consumeOneCredit(tgId){
     db.prepare(`UPDATE entitlements SET credits_left=credits_left-1 WHERE rowid=?`).run(row.rowid);
     return true;
 }
-export function grantTimePass(tgId, hours){
-    db.prepare(`INSERT INTO entitlements (tg_id, kind, expires_at) VALUES (?,?, datetime('now', ?))`)
-        .run(String(tgId), 'time', `+${Number(hours)} hours`);
+
+// ✅ ВАЖНО: суммируем время к текущему активному (rollover), иначе — от текущего момента
+export function grantTimePass(tgId, hours) {
+    const id = String(tgId);
+    const h  = Number(hours);
+
+    const row = db.prepare(`
+    SELECT rowid, expires_at
+    FROM entitlements
+    WHERE tg_id=? AND kind='time'
+    ORDER BY expires_at DESC
+    LIMIT 1
+  `).get(id);
+
+    const now = new Date();
+
+    let base = now;
+    let baseRowId = null;
+
+    if (row?.expires_at) {
+        const currentExp = new Date(row.expires_at.replace(' ', 'T') + 'Z');
+        if (currentExp > now) {
+            base = currentExp;     // активный — продлеваем от него
+            baseRowId = row.rowid; // обновим эту запись
+        }
+    }
+
+    const newExp = new Date(base.getTime() + h * 3600_000);
+    const sqlExp = newExp.toISOString().replace('T', ' ').slice(0, 19); // 'YYYY-MM-DD HH:MM:SS'
+
+    if (baseRowId) {
+        db.prepare(`UPDATE entitlements SET expires_at=? WHERE rowid=?`).run(sqlExp, baseRowId);
+    } else {
+        db.prepare(`INSERT INTO entitlements (tg_id, kind, expires_at) VALUES (?,?,?)`)
+            .run(id, 'time', sqlExp);
+    }
 }
+
 export function grantCredits(tgId, credits){
     db.prepare(`INSERT INTO entitlements (tg_id, kind, credits_left) VALUES (?,?,?)`)
         .run(String(tgId), 'credits', Number(credits));
 }
-export function logPayment({ tgId, plan, amountStars=null, amountCents=null, currency='USD' }){
-    db.prepare(`INSERT INTO payments (tg_id, plan, amount_stars, amount_cents, currency) VALUES (?,?,?,?,?)`)
-        .run(String(tgId), plan, amountStars, amountCents, currency);
+
+// payments log (сумма в валюте — число; для Stars можно писать в amount_stars)
+export function logPayment(tgId, amountInCurrency, currency, plan, providerChargeId=null, telegramChargeId=null){
+    db.prepare(`
+    INSERT INTO payments (tg_id, plan, amount_cents, currency, provider_charge_id, telegram_charge_id, status)
+    VALUES (?,?,?,?,?,?, 'paid')
+  `).run(String(tgId), String(plan), Math.round(Number(amountInCurrency)*100), currency || 'USD', providerChargeId, telegramChargeId);
 }
 
-// ---------------------- STATS ----------------------
+// ------------ STATS -------------
 export function countUsers(){
     return db.prepare(`SELECT COUNT(*) AS c FROM users`).get().c || 0;
 }
@@ -249,10 +296,10 @@ export function sumCreditsLeftAll(){
     WHERE kind='credits' AND credits_left > 0
   `).get().s || 0;
 }
-export function myCreditsLeft(tgId){
+export function myCreditsLeftSummary(tgId){
     return creditsLeft(tgId);
 }
-export function myTimePassUntil(tgId){
+export function myTimePassUntilSummary(tgId){
     return timePassUntil(tgId);
 }
 export function paymentsSummary(){
