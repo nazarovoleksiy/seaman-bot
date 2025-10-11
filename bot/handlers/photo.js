@@ -7,13 +7,19 @@ import {
     myCreditsLeft,
     hasTimePass,
     myTimePassUntil,
-    consumeOneCredit,
+    consumeOneCredit
 } from '../../db/database.js';
-import { askVisionSafe, withConcurrency } from '../../utils/ai.js';
 
-// ---------- антифлуд / одиночная обработка ----------
-const lastHit = new Map();    // userId -> timestamp
-const inProgress = new Set(); // userIds
+import { preprocessToDataUrl } from '../../utils/image.js';
+import { extractMcqFromImage } from '../../utils/ocr.js';
+import { solveMcq } from '../../utils/reason.js';
+
+import { withConcurrency } from '../../utils/ai.js';
+import { getCachedAnswer, saveCachedAnswer } from '../../db/answerCache.js';
+
+// ===== антифлуд =====
+const lastHit = new Map();
+const inProgress = new Set();
 const COOLDOWN_MS = 10_000;
 
 function cooldownPassed(id) {
@@ -23,105 +29,81 @@ function cooldownPassed(id) {
     return true;
 }
 
-// ---------- форматирование оставшегося времени ----------
+// ===== форматирование времени =====
 function leftMsFromSqlite(utcSql) {
     if (!utcSql) return 0;
     const t = new Date(utcSql.replace(' ', 'T') + 'Z').getTime();
     return Math.max(t - Date.now(), 0);
 }
 function formatHM(ms, lang) {
-    if (ms <= 0) return lang==='ru' ? 'нет' : lang==='uk' ? 'немає' : 'none';
+    if (ms <= 0) return lang === 'ru' ? 'нет' : lang === 'uk' ? 'немає' : 'none';
     const totalMin = Math.floor(ms / 60000);
     const h = Math.floor(totalMin / 60);
     const m = totalMin % 60;
-    if (lang==='ru') {
-        const hL = h===1?'час':(h>=2&&h<=4?'часа':'часов');
-        const mL = m===1?'минута':(m>=2&&m<=4?'минуты':'минут');
-        return h>0 && m>0 ? `${h} ${hL} ${m} ${mL}` : h>0 ? `${h} ${hL}` : `${m} ${mL}`;
-    } else if (lang==='uk') {
-        return h>0 && m>0 ? `${h} год ${m} хв` : h>0 ? `${h} год` : `${m} хв`;
+    if (lang === 'ru') {
+        const hL = h === 1 ? 'час' : (h >= 2 && h <= 4 ? 'часа' : 'часов');
+        const mL = m === 1 ? 'минута' : (m >= 2 && m <= 4 ? 'минуты' : 'минут');
+        return h > 0 && m > 0 ? `${h} ${hL} ${m} ${mL}` : h > 0 ? `${h} ${hL}` : `${m} ${mL}`;
+    } else if (lang === 'uk') {
+        return h > 0 && m > 0 ? `${h} год ${m} хв` : h > 0 ? `${h} год` : `${m} хв`;
     } else {
-        const hL = h===1?'hour':'hours';
-        const mL = m===1?'min':'mins';
-        return h>0 && m>0 ? `${h} ${hL} ${m} ${mL}` : h>0 ? `${h} ${hL}` : `${m} ${mL}`;
+        const hL = h === 1 ? 'hour' : 'hours';
+        const mL = m === 1 ? 'min' : 'mins';
+        return h > 0 && m > 0 ? `${h} ${hL} ${m} ${mL}` : h > 0 ? `${h} ${hL}` : `${m} ${mL}`;
     }
 }
 
-// ---------- визуальный анализ ----------
-async function analyzeQuestionImage(imageUrl, lang) {
-    const instruction =
-        lang === 'ru'
-            ? `Ты — преподаватель. На фото вопрос с вариантами (A, B, C, D).
-Определи правильный ответ и кратко объясни почему.
-Формат:
-✅ Правильный ответ: <буква> — <текст варианта>
-💡 Объяснение: <1–2 предложения>`
-            : lang === 'uk'
-                ? `Ти — викладач. На фото тестове питання з варіантами (A, B, C, D).
-Визнач правильну відповідь і коротко поясни чому.
-Формат:
-✅ Правильна відповідь: <літера> — <текст варіанту>
-💡 Пояснення: <1–2 короткі речення>`
-                : `You are a teacher. The image shows a multiple-choice question (A, B, C, D).
-Find the correct answer and briefly explain why.
-Format:
-✅ Correct answer: <letter> — <option text>
-💡 Explanation: <1–2 short sentences>`;
+function renderAnswer(out, lang) {
+    const THR = Number(process.env.LOW_CONFIDENCE_THRESHOLD || 0.75);
+    const low = typeof out.confidence === 'number' && out.confidence < THR;
 
-    const res = await askVisionSafe({
-        model: 'gpt-4.1-mini',
-        temperature: 0.2,
-        input: [
-            { role: 'system', content: instruction },
-            { role: 'user',   content: [{ type: 'input_image', image_url: imageUrl }] },
-        ],
-    });
-
-    const out = (res.output_text || '')
-        .split('\n')
-        .filter(l => l.includes('✅') || l.includes('💡'))
-        .join('\n')
-        .trim();
-
-    return out || (lang==='ru'
-        ? '⚠️ Не удалось распознать вопрос. Пришли фото четче.'
-        : lang==='uk'
-            ? '⚠️ Не вдалося розпізнати питання. Надішли чіткіше фото.'
-            : '⚠️ Could not recognize the question. Please send a clearer photo.');
+    if (lang === 'ru') {
+        return `✅ Правильный ответ: ${out.answer_letter} — ${out.answer_text}\n` +
+            `💡 Объяснение: ${out.explanation}` +
+            (low ? `\n⚠️ Низкая уверенность (${Math.round(out.confidence*100)}%). Попробуй прислать более чёткий скрин.` : ``);
+    } else if (lang === 'uk') {
+        return `✅ Правильна відповідь: ${out.answer_letter} — ${out.answer_text}\n` +
+            `💡 Пояснення: ${out.explanation}` +
+            (low ? `\n⚠️ Низька впевненість (${Math.round(out.confidence*100)}%). Спробуй надіслати чіткіший скрин.` : ``);
+    } else {
+        return `✅ Correct answer: ${out.answer_letter} — ${out.answer_text}\n` +
+            `💡 Explanation: ${out.explanation}` +
+            (low ? `\n⚠️ Low confidence (${Math.round(out.confidence*100)}%). Try a clearer full screenshot.` : ``);
+    }
 }
 
-// ---------- обработчик фото ----------
+// ===== основной обработчик =====
 export function registerPhotoHandler(bot) {
     bot.on('photo', async (ctx) => {
         const uid  = ctx.from.id;
         const lang = getLang(uid);
 
-        // антифлуд
         if (!cooldownPassed(uid)) {
             return ctx.reply(
-                lang==='ru' ? '⏳ Подожди 10 секунд и пришли снова.'
-                    : lang==='uk' ? '⏳ Зачекай 10 секунд і спробуй ще раз.'
-                        : '⏳ Please wait 10 seconds and try again.'
+                lang === 'ru' ? '⏳ Подожди 10 секунд и пришли снова.' :
+                    lang === 'uk' ? '⏳ Зачекай 10 секунд і спробуй ще раз.' :
+                        '⏳ Please wait 10 seconds and try again.'
             );
         }
+
         if (inProgress.has(uid)) {
             return ctx.reply(
-                lang==='ru' ? '🛠 Уже разбираю предыдущее фото. Дождись ответа.'
-                    : lang==='uk' ? '🛠 Уже розбираю попереднє фото. Зачекай відповіді.'
-                        : '🛠 I’m already analyzing your previous photo. Please wait.'
+                lang === 'ru' ? '🛠 Уже разбираю предыдущее фото. Дождись ответа.' :
+                    lang === 'uk' ? '🛠 Уже розбираю попереднє фото. Зачекай відповіді.' :
+                        '🛠 I’m already analyzing your previous photo. Please wait.'
             );
         }
 
-        // доступ до запуска модели (экономим токены)
-        const hasPass    = hasTimePass(uid);
-        const used       = totalUsage(uid);
-        const credits    = myCreditsLeft(uid);
-        const freeLeft   = Math.max(FREE_TOTAL_LIMIT - used, 0);
+        // доступ
+        const hasPass  = hasTimePass(uid);
+        const used     = totalUsage(uid);
+        const credits  = myCreditsLeft(uid);
+        const freeLeft = Math.max(FREE_TOTAL_LIMIT - used, 0);
 
         if (!hasPass && freeLeft <= 0 && credits <= 0) {
-            const msg = lang==='ru'
+            const msg = lang === 'ru'
                 ? '🚦 Доступ закончился: бесплатные попытки исчерпаны и кредитов нет. Купи доступ: /buy'
-                : lang==='uk'
+                : lang === 'uk'
                     ? '🚦 Доступ закінчився: безкоштовні спроби вичерпані і кредитів немає. Купи доступ: /buy'
                     : '🚦 Access ended: no free attempts and no credits left. Buy access: /buy';
             return ctx.reply(msg);
@@ -130,89 +112,111 @@ export function registerPhotoHandler(bot) {
         inProgress.add(uid);
         try {
             await ctx.reply(
-                lang==='ru' ? '📷 Фото получено. Анализирую…'
-                    : lang==='uk' ? '📷 Фото отримано. Аналізую…'
-                        : '📷 Photo received. Analyzing…'
+                lang === 'ru' ? '📷 Фото получено. Улучшаю изображение и анализирую…' :
+                    lang === 'uk' ? '📷 Фото отримано. Покращую зображення й аналізую…' :
+                        '📷 Photo received. Enhancing and analyzing…'
             );
 
-            // получить fileUrl
-            const photos  = ctx.message.photo;
-            const fileId  = photos[photos.length - 1].file_id;
-            const file    = await ctx.telegram.getFile(fileId);
+            const photos = ctx.message.photo;
+            const last = photos[photos.length - 1];
+            const fileUid = last.file_unique_id;
+            const file = await ctx.telegram.getFile(last.file_id);
             const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
-            // анализ (с ограничением параллелизма)
-            const result = await withConcurrency(() => analyzeQuestionImage(fileUrl, lang));
+            // кэш: если уже решали то же фото этим пайплайном — вернём готовый ответ
+            const VER = process.env.PIPE_VER || 'v1';
+            const cached = getCachedAnswer(fileUid, VER);
+            let answerObj = cached ? JSON.parse(cached) : null;
 
-            // ====== УЧЁТ ДОСТУПА ПО ПРИОРИТЕТУ ======
-            const creditsBefore = credits;   // уже посчитали выше
-            const usedBefore    = used;
+            if (!answerObj) {
+                // 1) предобработка
+                const dataUrl = await withConcurrency(() => preprocessToDataUrl(fileUrl));
 
-            let deducted = 'none'; // 'pass' | 'free' | 'credit' | 'none'
+                // 2) OCR
+                const ocr = await withConcurrency(() => extractMcqFromImage(dataUrl, lang));
+                if (!ocr || !ocr.question || !Array.isArray(ocr.options) || ocr.options.length < 2) {
+                    const msg = lang === 'ru'
+                        ? '⚠️ Не удалось распознать вопрос. Пришли скрин с полным вопросом и вариантами A/B/C/D.'
+                        : lang === 'uk'
+                            ? '⚠️ Не вдалося розпізнати питання. Надішли скрин із повним питанням і варіантами A/B/C/D.'
+                            : '⚠️ Could not read the question. Please send a full screenshot with the question and options A/B/C/D.';
+                    await ctx.reply(msg);
+                    inProgress.delete(uid);
+                    return;
+                }
+
+                // 3) Решение (reasoning) с fallback
+                const solved = await withConcurrency(() => solveMcq(ocr, lang));
+                if (!solved || !solved.answer_letter || !solved.answer_text) {
+                    const msg = lang === 'ru'
+                        ? '⚠️ Не удалось уверенно решить. Пришли более чёткий скрин.'
+                        : lang === 'uk'
+                            ? '⚠️ Не вдалося впевнено вирішити. Надішли чіткіший скрин.'
+                            : '⚠️ Could not confidently solve. Please send a clearer screenshot.';
+                    await ctx.reply(msg);
+                    inProgress.delete(uid);
+                    return;
+                }
+
+                answerObj = { ...solved };
+                // сохраним в кэш
+                saveCachedAnswer(fileUid, VER, answerObj);
+            }
+
+            // ===== учёт доступа по приоритету =====
+            let deducted = 'none';
             if (hasPass) {
-                deducted = 'pass'; // ничего не списываем
-            } else if (usedBefore < FREE_TOTAL_LIMIT) {
-                incUsage(uid);     // списали бесплатный
+                deducted = 'pass';
+            } else if (used < FREE_TOTAL_LIMIT) {
+                incUsage(uid);
                 deducted = 'free';
-            } else if (creditsBefore > 0) {
-                consumeOneCredit(uid); // списали кредит
+            } else if (credits > 0) {
+                consumeOneCredit(uid);
                 deducted = 'credit';
             } else {
-                // теоретически сюда не дойдём из-за ранней проверки, но на всякий случай
-                const msg = lang==='ru'
+                const msg = lang === 'ru'
                     ? '🚦 Доступ закончился. Купи доступ: /buy'
-                    : lang==='uk'
+                    : lang === 'uk'
                         ? '🚦 Доступ закінчився. Купи доступ: /buy'
                         : '🚦 Access ended. Buy access: /buy';
                 await ctx.reply(msg);
+                inProgress.delete(uid);
                 return;
             }
 
-            // остатки после списания
-            const usedAfter    = deducted==='free' ? usedBefore + 1 : usedBefore;
+            const usedAfter    = deducted === 'free' ? used + 1 : used;
             const freeLeftNow  = Math.max(FREE_TOTAL_LIMIT - usedAfter, 0);
-            const creditsAfter = deducted==='credit' ? creditsBefore - 1 : creditsBefore;
+            const creditsAfter = deducted === 'credit' ? credits - 1 : credits;
 
-            const passMs  = leftMsFromSqlite(myTimePassUntil(uid));
+            const passMs = leftMsFromSqlite(myTimePassUntil(uid));
             const passStr = passMs > 0
-                ? (lang==='ru' ? `осталось ${formatHM(passMs, lang)}`
-                    : lang==='uk' ? `залишилось ${formatHM(passMs, lang)}`
+                ? (lang === 'ru' ? `осталось ${formatHM(passMs, lang)}`
+                    : lang === 'uk' ? `залишилось ${formatHM(passMs, lang)}`
                         : `left ${formatHM(passMs, lang)}`)
-                : (lang==='ru' ? 'нет' : lang==='uk' ? 'немає' : 'none');
+                : (lang === 'ru' ? 'нет' : lang === 'uk' ? 'немає' : 'none');
 
             const suffix =
-                lang==='ru'
+                lang === 'ru'
                     ? `\n\n👤 Твой доступ:\n• Бесплатный лимит: использовано ${usedAfter} из ${FREE_TOTAL_LIMIT} (осталось ${freeLeftNow})\n• Кредиты: ${creditsAfter}\n• Day Pass: ${passStr}`
-                    : lang==='uk'
+                    : lang === 'uk'
                         ? `\n\n👤 Твій доступ:\n• Безкоштовний ліміт: використано ${usedAfter} із ${FREE_TOTAL_LIMIT} (залишилось ${freeLeftNow})\n• Кредити: ${creditsAfter}\n• Day Pass: ${passStr}`
                         : `\n\n👤 Your access:\n• Free limit: used ${usedAfter} of ${FREE_TOTAL_LIMIT} (left ${freeLeftNow})\n• Credits: ${creditsAfter}\n• Day Pass: ${passStr}`;
 
-            // ответ + кнопки (Feedback + Help)
-            await ctx.reply(result + suffix, {
+            await ctx.reply(renderAnswer(answerObj, lang) + suffix, {
                 reply_markup: {
                     inline_keyboard: [[
-                        {
-                            text: lang==='ru' ? 'Оставить отзыв'
-                                : lang==='uk' ? 'Залишити відгук'
-                                    : 'Leave feedback',
-                            callback_data: 'fb:start'
-                        },
-                        {
-                            text: lang==='ru' ? '❓ Помощь'
-                                : lang==='uk' ? '❓ Допомога'
-                                    : '❓ Help',
-                            callback_data: 'help:open'
-                        }
+                        { text: lang === 'ru' ? 'Оставить отзыв' : lang === 'uk' ? 'Залишити відгук' : 'Leave feedback', callback_data: 'fb:start' },
+                        { text: lang === 'ru' ? '❓ Помощь'       : lang === 'uk' ? '❓ Допомога'     : '❓ Help',        callback_data: 'help:open' }
                     ]]
                 }
             });
 
         } catch (e) {
             console.error('Photo handler error:', e);
-            return ctx.reply(
-                lang==='ru' ? '⚠️ Ошибка при анализе. Попробуй позже.'
-                    : lang==='uk' ? '⚠️ Помилка під час аналізу. Спробуй пізніше.'
-                        : '⚠️ Error during analysis. Please try later.'
+            await ctx.reply(
+                lang === 'ru' ? '⚠️ Ошибка при анализе. Попробуй позже.' :
+                    lang === 'uk' ? '⚠️ Помилка під час аналізу. Спробуй пізніше.' :
+                        '⚠️ Error during analysis. Please try later.'
             );
         } finally {
             inProgress.delete(uid);
