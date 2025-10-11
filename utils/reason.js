@@ -29,7 +29,7 @@ async function chooseAnswer({ question, options, lang='en' }) {
     const res = await askTextSafe({
         model: REASON_MODEL,
         temperature: 0.2,
-        text: { format: { type: 'json' } }, // <-- ОБЪЕКТ
+        text: { format: { type: 'json_object' } }, // <-- фикс: json_object
         input: [
             { role: 'system', content: sys },
             { role: 'user',   content: user }
@@ -62,7 +62,7 @@ async function selfCheck({ question, options, chosenLetter, lang='en' }) {
     const res = await askTextSafe({
         model: VALIDATE_MODEL,
         temperature: 0,
-        text: { format: { type: 'json' } }, // <-- ОБЪЕКТ
+        text: { format: { type: 'json_object' } }, // <-- фикс: json_object
         input: [
             { role: 'system', content: sys },
             { role: 'user',   content: user }
@@ -79,8 +79,7 @@ async function selfCheck({ question, options, chosenLetter, lang='en' }) {
 }
 
 /**
- * solveMcq(ocr, lang) -> { answer_letter, answer_text, confidence, explanation }
- * Комбинирует: первый выбор → self-check → при необходимости второй проход (консенсус).
+ * reasonWithConsensus -> согласование/проверка ответа
  */
 export async function reasonWithConsensus({ question, options, lang='en' }) {
     const first = await chooseAnswer({ question, options, lang });
@@ -116,7 +115,7 @@ export async function reasonWithConsensus({ question, options, lang='en' }) {
     };
 }
 
-// хелпер для твоего photo.js (тот формат, который ты ожидаешь)
+// адаптер под твой photo.js
 export async function solveMcq(ocr, lang='en') {
     const r = await reasonWithConsensus({ question: ocr.question, options: ocr.options, lang });
     return {
