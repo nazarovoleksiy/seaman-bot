@@ -1,84 +1,92 @@
 // utils/ocr.js
-import { askVisionSafe } from './ai.js';
+import { MODELS, requestWithRetries } from './ai.js';
 
-const OCR_MODEL = process.env.OCR_MODEL || 'gpt-4o-mini';
+// Пробуем сначала strict JSON (json_schema), если API ругнётся — фолбэк на json_object
+export async function extractMcqFromImage(imageDataUrl, lang = 'en') {
+    const sys = lang === 'ru'
+        ? `Ты распознаёшь вопрос с вариантами ответов из изображения. 
+Верни строго JSON с полями:
+- question: строка (текст вопроса)
+- options: массив строк (2–8 вариантов)
+Не добавляй ничего лишнего.`
+        : lang === 'uk'
+            ? `Ти розпізнаєш питання з варіантами відповідей із зображення.
+Поверни суворий JSON з полями:
+- question: рядок
+- options: масив рядків (2–8 варіантів)
+Без зайвого тексту.`
+            : `You extract a multiple-choice question from an image.
+Return strict JSON with:
+- question: string
+- options: string[] (2–8 items)
+No extra text.`;
 
-function normalizeLetter(s) {
-    return String(s || '').toUpperCase().replace(/[^A-F]/g, '');
-}
-function dedupeOptions(options) {
-    const seen = new Set(), out = [];
-    for (const o of options) {
-        const text = String(o.text || '').trim();
-        const letter = String(o.letter || '').trim();
-        const key = `${letter}::${text}`;
-        if (letter && text && !seen.has(key)) {
-            seen.add(key);
-            out.push({ letter, text });
-        }
-    }
-    return out;
-}
-function clampToAF(options) {
-    const letters = 'ABCDEF'.split('');
-    const out = [];
-    for (let i = 0; i < options.length && i < 6; i++) {
-        out.push({ letter: letters[i], text: String(options[i].text || '').trim() });
-    }
-    return out;
-}
+    // Пользовательское сообщение: изображение + короткая подсказка
+    const userContent = [
+        { type: 'input_text', text: 'Extract the MCQ and return JSON only.' },
+        { type: 'input_image', image_url: imageDataUrl },
+    ];
 
-/**
- * Извлекает MCQ из изображения.
- * @param {string} imageUrl - обычный URL (Telegram CDN) или data: URL
- * @param {'ru'|'uk'|'en'} lang
- * @returns {Promise<{ok:boolean, question?:string, options?:{letter:string,text:string}[]}>}
- */
-export async function extractMcqFromImage(imageUrl, lang = 'en') {
-    const sys =
-        'You extract structured MCQ data from an image. ' +
-        'Return ONLY valid JSON with fields: ' +
-        '{"question": string, "options": [{"letter":"A|B|C|D|E|F","text": string}]}. ' +
-        'Use 2..6 options that TRULY appear in the image. Do NOT invent options.';
-
-    const user =
-        lang === 'ru'
-            ? 'На изображении — тест. Извлеки вопрос и 2–6 вариантов ответов (буквы A–F). Верни ТОЛЬКО JSON.'
-            : lang === 'uk'
-                ? 'На зображенні — тест. Витягни питання і 2–6 варіантів відповідей (A–F). Поверни ЛИШЕ JSON.'
-                : 'The image shows an MCQ. Extract the question and 2–6 options (A–F). Return JSON ONLY.';
-
-    const res = await askVisionSafe({
-        model: OCR_MODEL,
-        temperature: 0,
-        text: { format: { type: 'json_object' } }, // <-- фикс: json_object
+    // 1) Попытка через text.format: json_schema
+    const reqSchema = {
+        model: MODELS.OCR,
         input: [
             { role: 'system', content: sys },
-            { role: 'user',   content: user },
-            { role: 'user',   content: [{ type: 'input_image', image_url: imageUrl }] }
-        ]
-    });
+            { role: 'user', content: userContent }
+        ],
+        text: {
+            format: {
+                type: 'json_schema',
+                json_schema: {
+                    name: 'MCQ',
+                    schema: {
+                        type: 'object',
+                        properties: {
+                            question: { type: 'string' },
+                            options:  { type: 'array', minItems: 2, maxItems: 8, items: { type: 'string' } }
+                        },
+                        required: ['question', 'options'],
+                        additionalProperties: true
+                    },
+                    strict: true
+                }
+            }
+        }
+    };
 
-    let raw = {};
-    try { raw = JSON.parse((res.output_text || '{}').trim()); } catch {}
+    try {
+        const r1 = await requestWithRetries(reqSchema, { tries: 1 });
+        // В Responses API JSON доступен как r1.output[0].content[0].text (в json_object/schema это уже строка JSON).
+        const raw = r1?.output_text || r1?.output?.[0]?.content?.[0]?.text || '';
+        const parsed = safeParse(raw);
+        if (isValid(parsed)) return parsed;
+    } catch (e) {
+        // Если API не поддерживает json_schema/или вернул invalid — пробуем json_object
+        // console.warn('OCR json_schema failed, falling back to json_object:', e);
+    }
 
-    let question = String(raw.question || '').replace(/\s+/g, ' ').trim();
-    let options  = Array.isArray(raw.options) ? raw.options : [];
+    // 2) Фолбэк: text.format: json_object
+    const reqObject = {
+        model: MODELS.OCR,
+        input: [
+            { role: 'system', content: sys },
+            { role: 'user', content: userContent }
+        ],
+        text: { format: { type: 'json_object' } }
+    };
 
-    options = options.map(o => ({
-        letter: normalizeLetter(o.letter),
-        text: String(o.text || '').replace(/\s+/g, ' ').trim()
-    })).filter(o => o.text);
+    const r2 = await requestWithRetries(reqObject, { tries: 2 });
+    const raw2 = r2?.output_text || r2?.output?.[0]?.content?.[0]?.text || '';
+    const parsed2 = safeParse(raw2);
+    if (isValid(parsed2)) return parsed2;
 
-    if (options.length < 2) return { ok: false };
-    if (options.length > 6) options = options.slice(0, 6);
+    return null;
+}
 
-    const uniq = new Set(options.map(o => o.letter).filter(Boolean));
-    if (uniq.size !== options.length) options = clampToAF(options);
-
-    options = dedupeOptions(options);
-    if (options.length < 2) return { ok: false };
-    if (!question) question = '(no question text)';
-
-    return { ok: true, question, options };
+function safeParse(s) {
+    try { return JSON.parse(s); } catch { return null; }
+}
+function isValid(obj) {
+    return obj && typeof obj.question === 'string'
+        && Array.isArray(obj.options) && obj.options.length >= 2;
 }
