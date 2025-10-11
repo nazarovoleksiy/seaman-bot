@@ -68,11 +68,13 @@ export async function extractMcqFromImage(imageUrl, lang='en') {
     const res = await askVisionSafe({
         model: OCR_MODEL,
         temperature: 0,
-        text: { format: 'json_schema', json_schema: ocrSchema },
+        text: { format: 'json' }, // <-- только json
         input: [
-            { role: 'system', content: sys },
+            { role: 'system', content:
+                    sys + '\nReturn ONLY valid JSON with fields: {"question":string,"options":[{"letter":"A|B|C|D|E|F","text":string}]}. 2..6 options.'
+            },
             { role: 'user',   content: user },
-            { role: 'user',   content: [{ type: 'input_image', image_url: imageUrl }] }
+            { role: 'user',   content: [{ type: 'input_image', image_url: imageSrc }] }
         ]
     });
 
