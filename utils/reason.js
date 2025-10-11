@@ -4,48 +4,21 @@ import { askTextSafe } from './ai.js';
 const REASON_MODEL   = process.env.REASON_MODEL   || 'o4-mini';
 const VALIDATE_MODEL = process.env.VALIDATE_MODEL || 'gpt-4.1-mini';
 
-const ansSchema = {
-    name: 'mcq_answer',
-    schema: {
-        type: 'object',
-        properties: {
-            letter:      { type: 'string', enum: ['A','B','C','D','E','F'] },
-            confidence:  { type: 'number' },
-            explanation: { type: 'string' }
-        },
-        required: ['letter','confidence'],
-        additionalProperties: false
-    },
-    strict: true
-};
-
-const valSchema = {
-    name: 'mcq_validate',
-    schema: {
-        type: 'object',
-        properties: {
-            ok:     { type: 'boolean' },
-            better: { type: ['string','null'], enum: ['A','B','C','D','E','F', null] }
-        },
-        required: ['ok','better'],
-        additionalProperties: false
-    },
-    strict: true
-};
-
-function normalizeLetter(s) {
+function normLetter(s) {
     return String(s || '').toUpperCase().replace(/[^A-F]/g, '');
 }
-function lettersFromOptions(options) {
-    return new Set((options || []).map(o => normalizeLetter(o.letter)).filter(Boolean));
+function letterSet(options) {
+    return new Set((options || []).map(o => normLetter(o.letter)).filter(Boolean));
 }
 
-export async function chooseAnswer({ question, options, lang='en' }) {
-    const letters = lettersFromOptions(options);
+async function chooseAnswer({ question, options, lang='en' }) {
+    const letters = letterSet(options);
     const listTxt = options.map(o => `${o.letter}) ${o.text}`).join('\n');
 
     const sys =
-        'You solve MCQs. Pick EXACTLY ONE letter that exists in options. Output STRICT JSON per schema.';
+        'You solve MCQs. Pick EXACTLY ONE letter that exists in options. ' +
+        'Return ONLY JSON: {"letter":"A|B|C|D|E|F","confidence":0..1,"explanation":string}';
+
     const user =
         lang === 'ru'
             ? `Вопрос:\n${question}\n\nВарианты:\n${listTxt}`
@@ -56,29 +29,29 @@ export async function chooseAnswer({ question, options, lang='en' }) {
     const res = await askTextSafe({
         model: REASON_MODEL,
         temperature: 0.2,
-        text: { format: 'json' },
+        text: { format: { type: 'json' } }, // <-- ОБЪЕКТ
         input: [
-            { role: 'system', content:
-                    'You solve MCQs. Pick EXACTLY ONE letter that exists in options. ' +
-                    'Return ONLY JSON: {"letter":"A|B|C|D|E|F","confidence":0..1,"explanation":string}'
-            },
+            { role: 'system', content: sys },
             { role: 'user',   content: user }
         ]
     });
 
     let obj = {};
     try { obj = JSON.parse((res.output_text || '{}').trim()); } catch {}
-    obj.letter = normalizeLetter(obj.letter);
+    obj.letter = normLetter(obj.letter);
     if (!letters.has(obj.letter)) obj.letter = '';
     obj.confidence = Math.max(0, Math.min(1, Number(obj.confidence) || 0.5));
     return { letter: obj.letter, confidence: obj.confidence, explanation: obj.explanation || '' };
 }
 
-export async function selfCheck({ question, options, chosenLetter, lang='en' }) {
-    const letters = lettersFromOptions(options);
+async function selfCheck({ question, options, chosenLetter, lang='en' }) {
+    const letters = letterSet(options);
     const listTxt = options.map(o => `${o.letter}) ${o.text}`).join('\n');
 
-    const sys = 'Validate MCQ answer. If chosen letter is not best, suggest a better one from options. JSON per schema.';
+    const sys =
+        'Validate MCQ answer. If the chosen letter is not best, suggest a better one ONLY from options. ' +
+        'Return ONLY JSON: {"ok":true|false,"better":"A|B|C|D|E|F|null"}';
+
     const user =
         lang === 'ru'
             ? `Проверь ответ.\nВопрос:\n${question}\n\nВарианты:\n${listTxt}\n\nВыбрано: ${chosenLetter}`
@@ -89,41 +62,67 @@ export async function selfCheck({ question, options, chosenLetter, lang='en' }) 
     const res = await askTextSafe({
         model: VALIDATE_MODEL,
         temperature: 0,
-        text: { format: 'json' },
+        text: { format: { type: 'json' } }, // <-- ОБЪЕКТ
         input: [
-            { role: 'system', content:
-                    'Validate MCQ answer. If the chosen letter is not best, suggest a better one ONLY from options. ' +
-                    'Return ONLY JSON: {"ok":true|false,"better":"A|B|C|D|E|F|null"}'
-            },
+            { role: 'system', content: sys },
             { role: 'user',   content: user }
         ]
     });
 
     try {
         const obj = JSON.parse((res.output_text || '{}').trim());
-        const b = normalizeLetter(obj.better);
+        const b = normLetter(obj.better);
         return { ok: !!obj.ok, better: letters.has(b) ? b : null };
     } catch {
         return { ok: true, better: null };
     }
 }
 
+/**
+ * solveMcq(ocr, lang) -> { answer_letter, answer_text, confidence, explanation }
+ * Комбинирует: первый выбор → self-check → при необходимости второй проход (консенсус).
+ */
 export async function reasonWithConsensus({ question, options, lang='en' }) {
     const first = await chooseAnswer({ question, options, lang });
-    if (first.letter && first.confidence >= 0.65) return first;
+    if (first.letter && first.confidence >= 0.65) {
+        const opt = options.find(o => o.letter === first.letter);
+        return {
+            letter: first.letter,
+            confidence: first.confidence,
+            explanation: first.explanation || '',
+            text: opt ? opt.text : ''
+        };
+    }
 
     const check = await selfCheck({ question, options, chosenLetter: first.letter, lang });
     if (!check.ok && check.better) {
-        return { letter: check.better, confidence: Math.max(0.7, first.confidence || 0.5), explanation: first.explanation || '' };
+        const opt = options.find(o => o.letter === check.better);
+        return {
+            letter: check.better,
+            confidence: Math.max(0.7, first.confidence || 0.5),
+            explanation: first.explanation || '',
+            text: opt ? opt.text : ''
+        };
     }
 
     const second = await chooseAnswer({ question, options, lang });
-    if (second.letter && second.letter === first.letter) {
-        return {
-            letter: first.letter,
-            confidence: Math.max(first.confidence, second.confidence, 0.7),
-            explanation: first.explanation || second.explanation || ''
-        };
-    }
-    return (second.confidence > first.confidence ? second : first);
+    const pick = (second.confidence > first.confidence ? second : first);
+    const opt = options.find(o => o.letter === pick.letter);
+    return {
+        letter: pick.letter || (options[0]?.letter || 'A'),
+        confidence: pick.confidence ?? 0.5,
+        explanation: pick.explanation || '',
+        text: opt ? opt.text : (options[0]?.text || '')
+    };
+}
+
+// хелпер для твоего photo.js (тот формат, который ты ожидаешь)
+export async function solveMcq(ocr, lang='en') {
+    const r = await reasonWithConsensus({ question: ocr.question, options: ocr.options, lang });
+    return {
+        answer_letter: r.letter,
+        answer_text:   r.text,
+        confidence:    r.confidence,
+        explanation:   r.explanation
+    };
 }
