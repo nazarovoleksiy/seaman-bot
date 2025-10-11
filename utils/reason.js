@@ -17,10 +17,10 @@ async function reasonOnce(ocr, lang = 'en', model = REASON_MODEL) {
 
     const sys =
         lang === 'ru'
-            ? `Ты — строгий экзаменационный ассистент. Выбери ровно ОДНУ букву правильного ответа и кратко объясни почему. Верни ТОЛЬКО JSON.`
+            ? `Ты — строгий экзаменационный ассистент. Выбери вариант правильного ответа и кратко объясни почему. Верни ТОЛЬКО JSON.`
             : lang === 'uk'
-                ? `Ти — суворий екзаменаційний асистент. Обери рівно ОДНУ літеру правильної відповіді і коротко поясни чому. Поверни ЛИШЕ JSON.`
-                : `You are a strict exam assistant. Pick exactly ONE correct option letter and briefly explain why. Return JSON ONLY.`;
+                ? `Ти — суворий екзаменаційний асистент. Обери вариант правильної відповіді і коротко поясни чому. Поверни ЛИШЕ JSON.`
+                : `You are a strict exam assistant. Pick  correct option letter and briefly explain why. Return JSON ONLY.`;
 
     const user =
         `${lang === 'ru' ? 'Вопрос' : lang === 'uk' ? 'Питання' : 'Question'}:
