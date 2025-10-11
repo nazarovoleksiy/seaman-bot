@@ -12,7 +12,7 @@ import {
 
 import { preprocessToDataUrl } from '../../utils/image.js';
 import { extractMcqFromImage } from '../../utils/ocr.js';
-import { solveMcq } from '../../utils/reason.js';
+import { reasonWithConsensus } from '../../utils/reason.js'; // ← заменили solveMcq
 
 import { withConcurrency } from '../../utils/ai.js';
 import { getCachedAnswer, saveCachedAnswer } from '../../db/answerCache.js';
@@ -59,23 +59,23 @@ function renderAnswer(out, lang) {
 
     if (lang === 'ru') {
         return `✅ Правильный ответ: ${out.answer_letter} — ${out.answer_text}\n` +
-            `💡 Объяснение: ${out.explanation}` +
-            (low ? `\n⚠️ Низкая уверенность (${Math.round(out.confidence*100)}%). Попробуй прислать более чёткий скрин.` : ``);
+            `💡 Объяснение: ${out.explanation || '—'}` +
+            (low ? `\n⚠️ Низкая уверенность (${Math.round(out.confidence * 100)}%). Попробуй прислать более чёткий скрин.` : ``);
     } else if (lang === 'uk') {
         return `✅ Правильна відповідь: ${out.answer_letter} — ${out.answer_text}\n` +
-            `💡 Пояснення: ${out.explanation}` +
-            (low ? `\n⚠️ Низька впевненість (${Math.round(out.confidence*100)}%). Спробуй надіслати чіткіший скрин.` : ``);
+            `💡 Пояснення: ${out.explanation || '—'}` +
+            (low ? `\n⚠️ Низька впевненість (${Math.round(out.confidence * 100)}%). Спробуй надіслати чіткіший скрин.` : ``);
     } else {
         return `✅ Correct answer: ${out.answer_letter} — ${out.answer_text}\n` +
-            `💡 Explanation: ${out.explanation}` +
-            (low ? `\n⚠️ Low confidence (${Math.round(out.confidence*100)}%). Try a clearer full screenshot.` : ``);
+            `💡 Explanation: ${out.explanation || '—'}` +
+            (low ? `\n⚠️ Low confidence (${Math.round(out.confidence * 100)}%). Try a clearer full screenshot.` : ``);
     }
 }
 
 // ===== основной обработчик =====
 export function registerPhotoHandler(bot) {
     bot.on('photo', async (ctx) => {
-        const uid  = ctx.from.id;
+        const uid = ctx.from.id;
         const lang = getLang(uid);
 
         if (!cooldownPassed(uid)) {
@@ -95,9 +95,9 @@ export function registerPhotoHandler(bot) {
         }
 
         // доступ
-        const hasPass  = hasTimePass(uid);
-        const used     = totalUsage(uid);
-        const credits  = myCreditsLeft(uid);
+        const hasPass = hasTimePass(uid);
+        const used = totalUsage(uid);
+        const credits = myCreditsLeft(uid);
         const freeLeft = Math.max(FREE_TOTAL_LIMIT - used, 0);
 
         if (!hasPass && freeLeft <= 0 && credits <= 0) {
@@ -123,31 +123,42 @@ export function registerPhotoHandler(bot) {
             const file = await ctx.telegram.getFile(last.file_id);
             const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
-            // кэш: если уже решали то же фото этим пайплайном — вернём готовый ответ
+            // кэш по уникальному ID картинки
             const VER = process.env.PIPE_VER || 'v1';
             const cached = getCachedAnswer(fileUid, VER);
             let answerObj = cached ? JSON.parse(cached) : null;
 
             if (!answerObj) {
-                // 1) предобработка
-                const dataUrl = await withConcurrency(() => preprocessToDataUrl(fileUrl));
+                // 1) предобработка (если упала — используем исходный URL)
+                let dataUrl = null;
+                try {
+                    dataUrl = await withConcurrency(() => preprocessToDataUrl(fileUrl));
+                } catch (e) {
+                    console.warn('preprocessToDataUrl failed, using original url:', e?.message || e);
+                    dataUrl = fileUrl;
+                }
 
                 // 2) OCR
                 const ocr = await withConcurrency(() => extractMcqFromImage(dataUrl, lang));
                 if (!ocr || !ocr.question || !Array.isArray(ocr.options) || ocr.options.length < 2) {
                     const msg = lang === 'ru'
-                        ? '⚠️ Не удалось распознать вопрос. Пришли скрин с полным вопросом и вариантами A/B/C/D.'
+                        ? '⚠️ Не удалось распознать вопрос. Пришли скрин с полным вопросом и вариантами A–F.'
                         : lang === 'uk'
-                            ? '⚠️ Не вдалося розпізнати питання. Надішли скрин із повним питанням і варіантами A/B/C/D.'
-                            : '⚠️ Could not read the question. Please send a full screenshot with the question and options A/B/C/D.';
+                            ? '⚠️ Не вдалося розпізнати питання. Надішли скрин із повним питанням і варіантами A–F.'
+                            : '⚠️ Could not read the question. Please send a full screenshot with the question and options A–F.';
                     await ctx.reply(msg);
                     inProgress.delete(uid);
                     return;
                 }
 
-                // 3) Решение (reasoning) с fallback
-                const solved = await withConcurrency(() => solveMcq(ocr, lang));
-                if (!solved || !solved.answer_letter || !solved.answer_text) {
+                // 3) Решение (reasoning) с self-check/консенсусом
+                const r = await withConcurrency(() => reasonWithConsensus({
+                    question: ocr.question,
+                    options: ocr.options,
+                    lang
+                }));
+
+                if (!r || !r.letter) {
                     const msg = lang === 'ru'
                         ? '⚠️ Не удалось уверенно решить. Пришли более чёткий скрин.'
                         : lang === 'uk'
@@ -158,20 +169,29 @@ export function registerPhotoHandler(bot) {
                     return;
                 }
 
-                answerObj = { ...solved };
-                // сохраним в кэш
+                const opt = ocr.options.find(o => o.letter === r.letter);
+                const ansText = opt ? opt.text : '';
+
+                answerObj = {
+                    answer_letter: r.letter,
+                    answer_text: ansText,
+                    explanation: r.explanation || '',
+                    confidence: r.confidence ?? 0.5
+                };
+
+                // кэшируем
                 saveCachedAnswer(fileUid, VER, answerObj);
             }
 
             // ===== учёт доступа по приоритету =====
             let deducted = 'none';
             if (hasPass) {
-                deducted = 'pass';
+                deducted = 'pass'; // ничего не списываем
             } else if (used < FREE_TOTAL_LIMIT) {
-                incUsage(uid);
+                incUsage(uid);     // сначала бесплатное
                 deducted = 'free';
             } else if (credits > 0) {
-                consumeOneCredit(uid);
+                consumeOneCredit(uid); // потом кредиты
                 deducted = 'credit';
             } else {
                 const msg = lang === 'ru'
@@ -184,11 +204,11 @@ export function registerPhotoHandler(bot) {
                 return;
             }
 
-            const usedAfter    = deducted === 'free' ? used + 1 : used;
-            const freeLeftNow  = Math.max(FREE_TOTAL_LIMIT - usedAfter, 0);
+            const usedAfter    = deducted === 'free'   ? used + 1 : used;
             const creditsAfter = deducted === 'credit' ? credits - 1 : credits;
+            const freeLeftNow  = Math.max(FREE_TOTAL_LIMIT - usedAfter, 0);
 
-            const passMs = leftMsFromSqlite(myTimePassUntil(uid));
+            const passMs  = leftMsFromSqlite(myTimePassUntil(uid));
             const passStr = passMs > 0
                 ? (lang === 'ru' ? `осталось ${formatHM(passMs, lang)}`
                     : lang === 'uk' ? `залишилось ${formatHM(passMs, lang)}`
