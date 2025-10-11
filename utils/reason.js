@@ -56,9 +56,12 @@ export async function chooseAnswer({ question, options, lang='en' }) {
     const res = await askTextSafe({
         model: REASON_MODEL,
         temperature: 0.2,
-        text: { format: 'json_schema', json_schema: ansSchema },
+        text: { format: 'json' },
         input: [
-            { role: 'system', content: sys },
+            { role: 'system', content:
+                    'You solve MCQs. Pick EXACTLY ONE letter that exists in options. ' +
+                    'Return ONLY JSON: {"letter":"A|B|C|D|E|F","confidence":0..1,"explanation":string}'
+            },
             { role: 'user',   content: user }
         ]
     });
@@ -84,13 +87,13 @@ export async function selfCheck({ question, options, chosenLetter, lang='en' }) 
                 : `Validate.\nQuestion:\n${question}\n\nOptions:\n${listTxt}\n\nChosen: ${chosenLetter}`;
 
     const res = await askTextSafe({
-        model: REASON_MODEL,
-        temperature: 0.2,
+        model: VALIDATE_MODEL,
+        temperature: 0,
         text: { format: 'json' },
         input: [
             { role: 'system', content:
-                    'You solve MCQs. Pick EXACTLY ONE letter that exists in options. ' +
-                    'Return ONLY JSON: {"letter":"A|B|C|D|E|F","confidence":0..1,"explanation":string}'
+                    'Validate MCQ answer. If the chosen letter is not best, suggest a better one ONLY from options. ' +
+                    'Return ONLY JSON: {"ok":true|false,"better":"A|B|C|D|E|F|null"}'
             },
             { role: 'user',   content: user }
         ]
