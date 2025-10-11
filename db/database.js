@@ -309,5 +309,55 @@ export function paymentsSummary(){
     GROUP BY currency
   `).all();
 }
+// db/database.js — Stripe совместимые функции
+
+export function grantCredits(tgId, credits) {
+    db.prepare(`INSERT INTO entitlements (tg_id, kind, credits_left) VALUES (?,?,?)`)
+        .run(String(tgId), 'credits', Number(credits));
+}
+
+export function grantTimePass(tgId, hours) {
+    const id = String(tgId);
+    const h  = Number(hours);
+
+    const row = db.prepare(`
+    SELECT rowid, expires_at
+    FROM entitlements
+    WHERE tg_id=? AND kind='time'
+    ORDER BY expires_at DESC
+    LIMIT 1
+  `).get(id);
+
+    const now = new Date();
+    let base = now;
+    let baseRowId = null;
+
+    if (row?.expires_at) {
+        const currentExp = new Date(row.expires_at.replace(' ', 'T') + 'Z');
+        if (currentExp > now) {
+            base = currentExp;
+            baseRowId = row.rowid;
+        }
+    }
+
+    const newExp = new Date(base.getTime() + h * 3600_000);
+    const sqlExp = newExp.toISOString().replace('T', ' ').slice(0, 19);
+
+    if (baseRowId) {
+        db.prepare(`UPDATE entitlements SET expires_at=? WHERE rowid=?`).run(sqlExp, baseRowId);
+    } else {
+        db.prepare(`INSERT INTO entitlements (tg_id, kind, expires_at) VALUES (?,?,?)`)
+            .run(id, 'time', sqlExp);
+    }
+}
+
+export function logPayment(tgId, amountInCurrency, currency, plan, providerChargeId=null, telegramChargeId=null) {
+    db.prepare(`
+    INSERT INTO payments (tg_id, plan, amount_cents, currency, provider_charge_id, telegram_charge_id, status)
+    VALUES (?,?,?,?,?,?, 'paid')
+  `).run(String(tgId), String(plan), Math.round(Number(amountInCurrency) * 100), currency || 'USD', providerChargeId, telegramChargeId);
+}
+
+
 
 export default db;

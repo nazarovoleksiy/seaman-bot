@@ -1,9 +1,11 @@
 import 'dotenv/config';
 import express from 'express';
 import { setupBot } from './bot/setupBot.js';
+import { stripeRouter } from './payments/stripe.js';
 
 const app = express();
 app.use(express.json());
+import { stripeRouter } from './payments/stripe.js';
 
 app.get('/', (_, res) => res.send('NovaLearn OK'));
 const PORT = process.env.PORT || 10000;
