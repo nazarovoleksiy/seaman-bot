@@ -22,3 +22,5 @@ export async function askVisionSafe(req) {
 export async function askTextSafe(req) {
     return ai.responses.create(req);
 }
+
+//11.10.2025
