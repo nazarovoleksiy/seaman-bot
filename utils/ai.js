@@ -16,7 +16,9 @@ function withTimeout(promise, ms=25000){
     return Promise.race([promise, timer]).finally(()=>clearTimeout(t));
 }
 
-export async function askVisionSafe(req){
-    try   { return await withTimeout(ai.responses.create(req), 25000); }
-    catch { return await withTimeout(ai.responses.create(req), 25000); }
+export async function askVisionSafe(req) {
+    return ai.responses.create(req);
+}
+export async function askTextSafe(req) {
+    return ai.responses.create(req);
 }
